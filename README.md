@@ -6,7 +6,7 @@
 
 ```bash
 pip install -r requirements.txt
-python -m downloader        # 或双击 run.bat
+python -m downloader
 ```
 
 ## 配置文件保存位置（可自定义）
