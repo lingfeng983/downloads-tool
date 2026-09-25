@@ -1,9 +1,10 @@
 # Java 构建产物
 target/
 
-# Python 构建产物
+# Python 构建产物（exe 发布文件除外）
 python/build/
-python/dist/
+python/dist/*
+!python/dist/DownloadsTool.exe
 __pycache__/
 *.pyc
 
