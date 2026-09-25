@@ -1,0 +1,11 @@
+# Java 构建产物
+target/
+
+# Python 构建产物
+python/build/
+python/dist/
+__pycache__/
+*.pyc
+
+# IDE
+.idea/
