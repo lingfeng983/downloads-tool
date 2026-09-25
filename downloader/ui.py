@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLineEdit, QPushButton, QLabel, QComboBox, QTableWidget, QTableWidgetItem,
     QHeaderView, QProgressBar, QFileDialog, QMessageBox, QAbstractItemView,
-    QSystemTrayIcon, QStyle, QFrame, QPlainTextEdit
+    QSystemTrayIcon, QStyle, QFrame, QPlainTextEdit, QMenu
 )
 
 from . import config
@@ -122,6 +122,8 @@ class MainWindow(QMainWindow):
         self._worker.done.connect(self._on_added)
         self._worker.finished.connect(self._on_batch_finished)
         self.tray = self._make_tray()
+        self._quitting = False
+        self._tray_hint_shown = False
         app = QApplication.instance()
         app.aboutToQuit.connect(self._persist_options)
         app.aboutToQuit.connect(self.mgr.shutdown)
@@ -246,9 +248,43 @@ class MainWindow(QMainWindow):
         if icon.isNull():
             icon = self.style().standardIcon(QStyle.SP_ArrowDown)
         tray = QSystemTrayIcon(icon, self)
-        tray.showMessage("下载工具已启动", "多线程下载工具正在运行",
-                         QSystemTrayIcon.Information, 3000)
+        tray.setToolTip("多线程下载工具")
+        menu = QMenu()
+        menu.addAction("显示主界面", self._show_from_tray)
+        menu.addSeparator()
+        menu.addAction("退出", self._quit)
+        tray.setContextMenu(menu)
+        tray.activated.connect(self._on_tray_activated)
+        tray.show()
         return tray
+
+    def _show_from_tray(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _on_tray_activated(self, reason):
+        if reason == QSystemTrayIcon.DoubleClick:
+            self._show_from_tray()
+
+    def _quit(self):
+        self._quitting = True
+        if self.tray:
+            self.tray.hide()
+        self.close()
+
+    def closeEvent(self, event):
+        # 关闭时最小化到托盘；仅托盘不可用或用户主动退出时才真正关闭
+        if self.tray and not self._quitting:
+            event.ignore()
+            self.hide()
+            if not self._tray_hint_shown:
+                self._tray_hint_shown = True
+                self.tray.showMessage(
+                    "已最小化到托盘", "程序仍在后台下载，双击托盘图标可恢复窗口",
+                    QSystemTrayIcon.Information, 3000)
+            return
+        super().closeEvent(event)
 
     # ---------- actions ----------
 
