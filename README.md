@@ -32,6 +32,8 @@ python -m PyInstaller --noconfirm --clean DownloadsTool.spec
 `DownloadsTool.spec` 会裁剪 QML/Quick/软件 OpenGL 渲染等 Qt Widgets 用不到的组件（42MB → 24MB）。
 exe 同样支持自定义数据目录：`DownloadsTool.exe --data-dir D:\MyToolData`。
 
+预编译的 exe 不在仓库源码中，发布在 Gitee「发行版（Releases）」页面，直接下载安装即可。
+
 最终用户使用手册见 [使用说明.md](使用说明.md)。
 
 ## 与原 Java 版对应的功能
