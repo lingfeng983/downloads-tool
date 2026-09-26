@@ -28,9 +28,9 @@ pip install pyinstaller
 python -m PyInstaller --noconfirm --clean DownloadsTool.spec
 ```
 
-产物为 `dist/DownloadsTool.exe`（约 24MB，单文件、免控制台、内置图标）。
+产物为 `dist/多线程下载工具.exe`（约 24MB，单文件、免控制台、内置图标、文件属性为中文）。
 `DownloadsTool.spec` 会裁剪 QML/Quick/软件 OpenGL 渲染等 Qt Widgets 用不到的组件（42MB → 24MB）。
-exe 同样支持自定义数据目录：`DownloadsTool.exe --data-dir D:\MyToolData`。
+exe 同样支持自定义数据目录：`多线程下载工具.exe --data-dir D:\MyToolData`。
 
 预编译的 exe 不在仓库源码中，发布在 Gitee「发行版（Releases）」页面，直接下载安装即可。
 

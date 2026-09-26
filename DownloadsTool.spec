@@ -61,10 +61,11 @@ exe = EXE(
     a.scripts,
     a.binaries,
     a.datas,
-    name='DownloadsTool',
+    name='多线程下载工具',
     debug=False,
     strip=False,
     upx=False,
     icon='assets/icon.ico',
+    version='version.txt',
     console=False,
 )
