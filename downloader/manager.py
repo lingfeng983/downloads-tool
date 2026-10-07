@@ -15,6 +15,13 @@ logger = logging.getLogger("downloader")
 ACTIVE_STATUSES = (TaskStatus.DOWNLOADING, TaskStatus.WAITING)
 
 
+def _silent_remove(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
 class DownloadManager:
     _instance = None
     _instance_lock = threading.Lock()
@@ -22,6 +29,7 @@ class DownloadManager:
     def __init__(self):
         self.settings = config.load_settings()
         self._lock = threading.RLock()
+        self._save_lock = threading.Lock()   # 串行化 save_state，避免多线程写同一个 .tmp
         self._tasks: dict[str, DownloadTask] = {}
         self._order: list[str] = []
         self.limiter = SpeedLimiter(self.settings.get("speed_limit", 0) or 0)
@@ -46,19 +54,25 @@ class DownloadManager:
         url = url.strip()
         if not url.startswith(("http://", "https://")):
             raise ValueError("请输入有效的 HTTP/HTTPS 链接")
+        # 先在锁内判定，再在锁外做 cancel/清理 —— cancel 内部要 join 线程，
+        # 放在锁内会把持有者锁的 UI 快照/持久化一起拖住。
         with self._lock:
             old = self._tasks.get(url)
-            if old is not None:
-                # 活跃任务不允许重复添加；已结束(完成/取消/错误)的历史任务让位重下
-                if old.info.status in (TaskStatus.DOWNLOADING, TaskStatus.PAUSED,
-                                       TaskStatus.WAITING):
-                    raise ValueError("该URL已在下载列表中")
-                self.cancel(url)
+            occupied = old is not None and old.info.status in (
+                TaskStatus.DOWNLOADING, TaskStatus.PAUSED, TaskStatus.WAITING)
+        if occupied:
+            raise ValueError("该URL已在下载列表中")
+        if old is not None:
+            # 已结束(完成/取消/错误)的历史任务让位重下
+            self.cancel(url)
         info = build_info(url, save_dir or self.save_dir,
                           thread_count or self.default_thread_count)
         task = DownloadTask(info, self.limiter)
         task._on_done = self._done_callback
         with self._lock:
+            # 探测期间同一 URL 可能被重复添加（批量粘贴并发），这里做最终判定
+            if url in self._tasks:
+                raise ValueError("该URL已在下载列表中")
             self._tasks[url] = task
             self._order.append(url)
         logger.info("创建下载任务: %s 大小=%s 线程=%s 断点续传=%s",
@@ -146,15 +160,27 @@ class DownloadManager:
     # ---------- 持久化 ----------
 
     def save_state(self):
+        """原子写任务列表。
+
+        监控线程每秒调一次，而 _done_callback / 行操作也会调，多个线程会
+        同时往同一个 .tmp 文件写 —— 在 Windows 上会撞出Permission denied，
+        且 os.replace 可能把写了一半的内容换上去。故用独立的写锁串行化，
+        并让临时文件名带上线程 id 兜底。
+        """
         try:
             with self._lock:
                 data = [t.info.to_dict() for t in self.tasks()]
-            state_file = config.STATE_FILE
-            os.makedirs(os.path.dirname(state_file), exist_ok=True)
-            tmp = state_file + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=1)
-            os.replace(tmp, state_file)
+            with self._save_lock:
+                state_file = config.STATE_FILE
+                os.makedirs(os.path.dirname(state_file), exist_ok=True)
+                tmp = f"{state_file}.{os.getpid()}.{threading.get_ident()}.tmp"
+                try:
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        json.dump(data, f, ensure_ascii=False, indent=1)
+                    os.replace(tmp, state_file)
+                except OSError:
+                    _silent_remove(tmp)
+                    raise
         except OSError as e:
             logger.warning("保存任务列表失败: %s", e)
 
@@ -168,10 +194,18 @@ class DownloadManager:
         except (OSError, json.JSONDecodeError) as e:
             logger.warning("读取任务列表失败: %s", e)
             return
+        restored = skipped = 0
         for d in data:
+            if not isinstance(d, dict):
+                skipped += 1
+                continue
             try:
                 info = DownloadInfo.from_dict(d)
-            except (KeyError, ValueError):
+            except (KeyError, ValueError, TypeError) as e:
+                # 静默跳过会让用户看到"任务凭空消失"，必须留下日志线索
+                skipped += 1
+                logger.warning("任务列表中存在无法解析的条目，已跳过: %s (%s)",
+                               (d or {}).get("url", "<无 url>"), e)
                 continue
             if info.status in ACTIVE_STATUSES:
                 info.status = TaskStatus.PAUSED   # 重启后不自动续传，等待用户继续
@@ -184,4 +218,8 @@ class DownloadManager:
                     continue
                 self._tasks[info.url] = task
                 self._order.append(info.url)
-        logger.info("已恢复 %s 个历史任务", len(self._tasks))
+            restored += 1
+        logger.info("已恢复 %s 个历史任务（跳过 %s 个无法解析的条目）", restored, skipped)
+        if skipped:
+            logger.warning("有 %s 个任务未能恢复，可在 %s 中查看原始数据",
+                           skipped, state_file)

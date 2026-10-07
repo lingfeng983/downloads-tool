@@ -3,6 +3,8 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 
+from .util import parts_dir
+
 
 class TaskStatus(Enum):
     WAITING = "等待中"
@@ -11,6 +13,31 @@ class TaskStatus(Enum):
     COMPLETED = "已完成"
     ERROR = "错误"
     CANCELLED = "已取消"
+
+    @classmethod
+    def parse(cls, value) -> "TaskStatus":
+        """从持久化数据解析状态，兼容英文键（DOWNLOADING）与中文值（下载中）。
+
+        任务列表文件是用户可见、可手工编辑的，不能因为一个字段写法不同
+        就把整个任务丢掉。
+        """
+        if isinstance(value, cls):
+            return value
+        s = str(value or "").strip()
+        if not s:
+            return cls.WAITING
+        try:
+            return cls[s]                      # 标准写法：英文名
+        except KeyError:
+            pass
+        try:
+            return cls[s.upper()]             # 容错：小写英文
+        except KeyError:
+            pass
+        for m in cls:                # 容错：中文显示值
+            if m.value == s:
+                return m
+        raise ValueError(f"无法识别的任务状态: {value!r}")
 
 
 @dataclass
@@ -25,12 +52,8 @@ class DownloadInfo:
     start_time: float = field(default_factory=time.time)
 
     @property
-    def target_path(self) -> str:
-        return self.save_path
-
-    @property
     def parts_dir(self) -> str:
-        return self.save_path + ".parts"
+        return parts_dir(self.save_path)
 
     def to_dict(self) -> dict:
         return {
@@ -50,9 +73,9 @@ class DownloadInfo:
             url=d["url"],
             file_name=d["file_name"],
             save_path=d["save_path"],
-            total_size=d["total_size"],
-            thread_count=d["thread_count"],
-            support_range=d["support_range"],
-            status=TaskStatus[d.get("status", "WAITING")],
-            start_time=d.get("start_time", time.time()),
+            total_size=int(d["total_size"]),
+            thread_count=max(1, int(d["thread_count"])),
+            support_range=bool(d["support_range"]),
+            status=TaskStatus.parse(d.get("status", "WAITING")),
+            start_time=float(d.get("start_time", time.time())),
         )

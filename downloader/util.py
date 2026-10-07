@@ -33,7 +33,12 @@ def format_speed(bytes_per_sec: float) -> str:
     return format_size(bytes_per_sec) + "/s"
 
 
+def format_progress(ratio: float) -> str:
+    return f"{ratio * 100:.1f}%"
+
+
 def format_remaining(remaining_bytes: int, speed: float) -> str:
+    """按当前速度估算剩余时间。UI 目前未展示，保留供后续启用剩余时间列。"""
     if speed <= 0:
         return "计算中..."
     seconds = int(remaining_bytes / speed)
@@ -44,10 +49,6 @@ def format_remaining(remaining_bytes: int, speed: float) -> str:
     if m > 0:
         return f"{m}分钟{s}秒"
     return f"{s}秒"
-
-
-def format_progress(ratio: float) -> str:
-    return f"{ratio * 100:.1f}%"
 
 
 def unique_path(directory: str, filename: str) -> str:

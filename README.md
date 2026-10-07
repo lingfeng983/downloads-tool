@@ -51,9 +51,11 @@ exe 同样支持自定义数据目录：`多线程下载工具.exe --data-dir D:
 | 断线自动重试 | 分片失败按指数退避自动重试（最多 5 次），服务器忽略 Range 时自动重写该分片，不再直接置错 |
 | 任务持久化 | 任务列表保存在 `~/.downloads_tool/tasks.json`，重启应用后恢复列表与进度（继续即从磁盘断点续传） |
 | 全局限速 | 滑动窗口限速器，所有任务/线程共享带宽上限 |
-| 完成通知 | 系统托盘气泡通知；可选"完成后自动打开所在文件夹"（explorer 定位选中文件） |
-| 快速失败 | 添加时探测 404/磁盘空间不足立即报错，不产生坏任务 |
+| 完成通知 | 系统托盘气泡通知；可选"完成后自动打开所在文件夹"（走 ShellExecute，比拉起 explorer.exe 快得多） |
+| 快速失败 | 添加时探测 404/磁盘空间不足立即报错，不产生坏任务；文件名自动清洗 Windows 非法字符 |
 | 重名保护 | 目标文件已存在时自动追加 `(1)(2)` 后缀，不覆盖 |
+| 暂停不卡界面 | 暂停/取消时主动 `shutdown()` 在途 socket 打断阻塞读，实测从 29 秒降到毫秒级 |
+| 健壮续传 | 停止下载时等待所有分片线程真正退出才允许继续，分片带写锁，杜绝两个线程同时写一个分片 |
 
 ## 目录结构
 
@@ -71,10 +73,14 @@ downloader/
   worker.py     后台添加任务（探测不阻塞 UI）
 tests/
   test_core.py  本地 Range 服务器端到端测试（多线程/续传/限速/单线程）
+  test_regression.py  回归测试：小文件多线程、暂停及时性、线程泄漏、文件名清洗
 ```
 
 ## 测试
 
 ```bash
 python tests/test_core.py
+python tests/test_regression.py
+cd tests && python test_thread_speed.py    # import test_core，需在 tests 目录下运行
+cd tests && python test_ui.py             # 离屏 UI 冒烟
 ```

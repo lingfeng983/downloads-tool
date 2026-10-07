@@ -282,6 +282,7 @@ class ThreadDetailDialog(QDialog):
         for i, w in enumerate([60, 78, 100, 150]):
             self.table.setColumnWidth(i, w)
         lay.addWidget(self.table, 1)
+        self._bars: dict[int, QProgressBar] = {}   # 复用进度条，避免每次 tick 重建
 
         box = QDialogButtonBox(QDialogButtonBox.Close)
         box.rejected.connect(self.reject)
@@ -307,7 +308,8 @@ class ThreadDetailDialog(QDialog):
         self.head.setText(
             f"{snap['file_name']} — 共 {len(chunks)} 个线程，"
             f"{live} 个传输中，总速度 {format_speed(snap['speed'])}")
-        self.table.setRowCount(len(chunks))
+        if len(chunks) != self.table.rowCount():
+            self.table.setRowCount(len(chunks))
         for r, c in enumerate(chunks):
             state = "已完成" if c["finished"] else ("传输中" if c["speed"] > 0 else "等待/停滞")
             state_item = QTableWidgetItem(state)
@@ -324,16 +326,21 @@ class ThreadDetailDialog(QDialog):
             sp.setFont(NUM_FONT)
             self.table.setItem(r, 2, sp)
 
-            bar = QProgressBar()
-            bar.setRange(0, 1000)
+            # 进度条按行缓存复用：原先每 700ms new QProgressBar + new QWidget，
+            # 对话框长时间开着会持续累积 Qt 对象
+            bar = self._bars.get(r)
+            if bar is None:
+                bar = QProgressBar()
+                bar.setRange(0, 1000)
+                bar.setTextVisible(False)
+                bar.setFixedHeight(12)
+                wrap = QWidget()
+                bl = QHBoxLayout(wrap)
+                bl.setContentsMargins(8, 0, 8, 0)
+                bl.addWidget(bar)
+                self._bars[r] = bar
+                self.table.setCellWidget(r, 3, wrap)
             bar.setValue(int(c["percent"] * 10))
-            bar.setTextVisible(False)
-            bar.setFixedHeight(12)
-            wrap = QWidget()
-            bl = QHBoxLayout(wrap)
-            bl.setContentsMargins(8, 0, 8, 0)
-            bl.addWidget(bar)
-            self.table.setCellWidget(r, 3, wrap)
 
             seg = "未知" if c["total"] <= 0 else \
                 f"{format_size(c['done'])} / {format_size(c['total'])}"
@@ -908,14 +915,3 @@ class MainWindow(QMainWindow):
             except OSError:
                 pass
         threading.Thread(target=run, daemon=True).start()
-
-    @staticmethod
-    def _reveal(path):
-        """需要在资源管理器中选中文件时才用（较慢，保留给显式需求）"""
-        folder = os.path.dirname(path)
-        if sys.platform == "win32":
-            subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", "-R", path])
-        else:
-            subprocess.Popen(["xdg-open", folder])

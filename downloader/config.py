@@ -8,8 +8,12 @@
 """
 import argparse
 import json
+import logging
 import os
 import shutil
+import threading
+
+logger = logging.getLogger("downloader")
 
 DEFAULT_DATA_DIR = os.path.join(os.path.expanduser("~"), ".downloads_tool")
 POINTER_FILE = os.path.join(DEFAULT_DATA_DIR, "pointer.json")
@@ -69,10 +73,18 @@ def init(argv=None):
 
 
 def _write_json(path: str, data):
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=1)
-    os.replace(tmp, path)
+    """原子写。与 manager.save_state 可能并发，临时文件名带 pid 以免互相覆盖。"""
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def load_settings() -> dict:
@@ -89,5 +101,6 @@ def save_settings(settings: dict):
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
         _write_json(SETTINGS_FILE, settings)
-    except OSError:
-        pass
+    except OSError as e:
+        # 静默吞掉会让用户以为设置已保存，重启后才发现没生效
+        logger.warning("保存设置失败: %s", e)
