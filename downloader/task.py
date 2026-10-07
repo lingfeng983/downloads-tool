@@ -25,6 +25,10 @@ class Chunk:
     start: int           # -1 表示大小未知
     end: int             # -1 表示大小未知
     path: str
+    written: int = 0          # 已落盘字节（会话内累计，用于分片测速）
+    speed: float = 0.0        # 该分片线程的瞬时速度（字节/秒）
+    finished: bool = False    # 分片已完成
+    _last_written: int = 0
 
     @property
     def length(self) -> int:
@@ -80,7 +84,8 @@ class DownloadTask:
     def downloaded(self) -> int:
         if self.info.status == TaskStatus.COMPLETED:
             return max(self.info.total_size, 0) or self._target_size()
-        total = sum(c.done_bytes() for c in self._chunks) if self._chunks else 0
+        # 分片写入计数器比 stat 更准确（不受缓冲刷盘延迟影响），也省掉逐片 getsize
+        total = sum(c.written for c in self._chunks) if self._chunks else 0
         if total == 0 and not self._chunks:
             # 未加载过分片（如重启恢复后尚未开始），尝试从磁盘目录恢复
             total = self._recover_dir_bytes()
@@ -107,6 +112,7 @@ class DownloadTask:
     def snapshot(self) -> dict:
         info = self.info
         downloaded = self.downloaded()
+        chunks = self._chunks
         return {
             "url": info.url,
             "file_name": info.file_name,
@@ -119,6 +125,7 @@ class DownloadTask:
             "thread_count": info.thread_count,
             "support_range": info.support_range,
             "error": self.error_msg,
+            "chunks": self.thread_speeds() if chunks else [],
         }
 
     # ---------- 生命周期 ----------
@@ -134,6 +141,8 @@ class DownloadTask:
         else:
             # 大小未知：单线程流式下载
             self._chunks.append(Chunk(0, -1, -1, os.path.join(d, "chunk_0.part")))
+        for c in self._chunks:
+            c.written = c._last_written = c.done_bytes()   # 续传起点对齐磁盘
 
     def start(self, on_done=None):
         """从当前进度开始/继续下载（幂等；等待中的任务由此真正启动）"""
@@ -251,12 +260,16 @@ class DownloadTask:
                         with open(chunk.path, mode) as fh:
                             if mode == "ab":
                                 fh.seek(cur)
+                            chunk.written = cur      # 计数器与磁盘对齐，供分片测速
+                            chunk._last_written = cur
+                            chunk.speed = 0.0
                             for block in r.iter_content(CHUNK_SIZE):
                                 if self._wait_flags():
                                     fh.flush()
                                     return
                                 self.limiter.consume(len(block))
                                 fh.write(block)
+                                chunk.written += len(block)
                                 if self._cancelled.is_set():
                                     return
                 except (requests.RequestException, OSError) as e:
@@ -327,6 +340,9 @@ class DownloadTask:
         with self._lock:
             if chunk is not None and chunk not in self._chunks:
                 return          # 单线程接管后，旧分片线程的完成信号作废
+            if chunk is not None:
+                chunk.finished = True
+                chunk.speed = 0.0
             self._done_count += 1
             all_done = self._done_count >= len(self._chunks)
         if all_done:
@@ -365,11 +381,13 @@ class DownloadTask:
     # ---------- 速度 ----------
 
     def tick_speed(self):
-        """由管理器定时调用（约每秒），计算瞬时速度（滑动平均防跳零）"""
+        """由管理器定时调用（约每秒），计算瞬时速度（滑动平均防跳零）。
+        同时逐分片计算各下载线程自己的速度。"""
         now = time.monotonic()
         cur = self.downloaded()
         dt = max(now - self._last_tick_time, 1e-3)
-        if self.info.status == TaskStatus.DOWNLOADING:
+        active = self.info.status == TaskStatus.DOWNLOADING
+        if active:
             inst = (cur - self._last_tick_bytes) / dt
             if self.speed > 0:
                 self.speed = round(0.5 * self.speed + 0.5 * inst, 1)
@@ -377,5 +395,29 @@ class DownloadTask:
                 self.speed = round(inst, 1)
         else:
             self.speed = 0.0
+        for c in self._chunks:
+            if not active or c.finished:
+                c.speed = 0.0
+            else:
+                raw = (c.written - c._last_written) / dt
+                c.speed = round(0.5 * c.speed + 0.5 * max(raw, 0.0), 1) if c.speed > 0 \
+                    else round(max(raw, 0.0), 1)
+            c._last_written = c.written
         self._last_tick_bytes = cur
         self._last_tick_time = now
+
+    def thread_speeds(self) -> list[dict]:
+        """各分片线程的实时速度，供 UI 展示"""
+        out = []
+        for c in sorted(self._chunks, key=lambda x: x.cid):
+            total = c.length
+            done = c.written
+            out.append({
+                "cid": c.cid,
+                "speed": c.speed if not c.finished else 0.0,
+                "done": done,
+                "total": total,
+                "percent": (min(done / total, 1.0) * 100 if total > 0 else 0.0),
+                "finished": c.finished,
+            })
+        return out
