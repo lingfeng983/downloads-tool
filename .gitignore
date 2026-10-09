@@ -7,5 +7,8 @@ __pycache__/
 # IDE
 .idea/
 
+# 发布令牌（release.sh 使用，严禁入库）
+.gitee_token
+
 # 本地工作数据（含 memory 目录，不入库）
 .workbuddy/
