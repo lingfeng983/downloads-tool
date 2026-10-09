@@ -41,7 +41,7 @@ exe 同样支持自定义数据目录：`多线程下载工具.exe --data-dir D:
 ./release.sh v3.1 标题   # 或显式指定 tag 与发行版标题
 ```
 
-脚本依次完成：打包 exe → 推送 tag → 创建/复用发行版 → 上传 exe 附件。需先配置 Gitee 个人访问令牌（勾选 projects 权限）：环境变量 `GITEE_TOKEN` 或仓库根目录 `.gitee_token` 文件（已 gitignore）。因 Gitee 未官方开放附件上传接口，若脚本提示附件接口不可用，它会给出发行版编辑页链接，手动拖入 `dist/多线程下载工具.exe` 即可。
+脚本依次完成：打包 exe → 推送 tag → 创建/更新发行版 → 上传 exe 附件（同名旧附件自动替换，可重复执行）。需先配置 Gitee 个人访问令牌（勾选 projects 权限）：环境变量 `GITEE_TOKEN` 或仓库根目录 `.gitee_token` 文件（已 gitignore）。中文标题/正文/文件名统一经 `release_publish.py` 以 UTF-8 直传 Gitee API，绕开 Windows 控制台 GBK 转码导致的乱码问题。
 
 最终用户使用手册见 [使用说明.md](使用说明.md)。
 

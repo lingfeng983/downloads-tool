@@ -9,7 +9,6 @@ cd "$(dirname "$0")"
 
 OWNER="lingfeng983"
 REPO="downloads-tool"
-API="https://gitee.com/api/v5"
 SPEC="DownloadsTool.spec"
 EXE="dist/多线程下载工具.exe"
 
@@ -35,7 +34,7 @@ fi
 TITLE="${2:-多线程下载工具 ${TAG}}"
 
 # ---------- 1. 打包 ----------
-echo "==> [1/4] PyInstaller 打包（约 2 分钟）"
+echo "==> [1/3] PyInstaller 打包（约 2 分钟）"
 rm -f "$EXE"
 python -m PyInstaller --noconfirm --clean "$SPEC" 2>&1 | tail -3 || true
 [ -f "$EXE" ] || die "打包失败（输出见上）"
@@ -43,7 +42,7 @@ SIZE=$(stat -c %s "$EXE")
 echo "    产物 $EXE（$SIZE 字节）"
 
 # ---------- 2. 打 tag 并推送 ----------
-echo "==> [2/4] 推送标签 $TAG"
+echo "==> [2/3] 推送标签 $TAG"
 if ! git ls-remote --tags origin "refs/tags/$TAG" | grep -q "refs/tags/$TAG"; then
   git tag -a "$TAG" -m "Release $TAG"
   git push origin "refs/tags/$TAG" || die "推送标签失败"
@@ -51,44 +50,20 @@ else
   echo "    标签 $TAG 已存在，复用"
 fi
 
-# ---------- 3. 创建/复用发行版 ----------
-echo "==> [3/4] 确保发行版存在"
-pyjq() { python -c "import sys,json;d=json.load(sys.stdin);print(d.get('$1','') if isinstance(d,dict) else '')"; }
-
-RID=$(curl -s "$API/repos/$OWNER/$REPO/releases/tags/$TAG" | pyjq id)
-if [ -z "$RID" ]; then
-  BODY_FILE="${3:-}"
-  if [ -n "$BODY_FILE" ] && [ -f "$BODY_FILE" ]; then BODY=$(cat "$BODY_FILE"); else
-    BODY="多线程下载工具 ${TAG} 单文件免安装版。
-
-- 下载 \`${EXE##*/}\` 双击即可运行（约 24MB，无需 Python）
-- 支持多线程分片、断点续传、限速、关闭最小化到托盘
-- 源码即 master 分支，$TAG 标签对应当前提交"
-  fi
-  RID=$(curl -s -X POST "$API/repos/$OWNER/$REPO/releases" \
-    --data-urlencode "access_token=$TOKEN" \
-    --data-urlencode "tag_name=$TAG" \
-    --data-urlencode "name=$TITLE" \
-    --data-urlencode "body=$BODY" | pyjq id)
-  [ -n "$RID" ] || die "创建发行版失败（检查令牌权限/tag 是否已推送）"
-  echo "    已创建发行版 #$RID"
+# ---------- 3. 创建/更新发行版 ----------
+echo "==> [3/3] 创建或更新发行版 $TAG（中文内容经 UTF-8 文件传递）"
+mkdir -p build
+printf '%s' "$TITLE" > build/rel_title.txt
+if [ -n "${3:-}" ] && [ -f "$3" ]; then
+  cp "$3" build/rel_body.txt
 else
-  echo "    发行版已存在（#$RID），追加附件"
-fi
+  cat > build/rel_body.txt <<EOF
+多线程下载工具 ${TAG} 单文件免安装版。
 
-# ---------- 4. 上传 exe 附件 ----------
-echo "==> [4/4] 上传附件 $(basename "$EXE")"
-NAME_ENC=$(python -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$(basename "$EXE")")
-RESP=$(curl -s -X POST \
-  -H "Content-Type: application/octet-stream" \
-  --data-binary "@$EXE" \
-  "$API/repos/$OWNER/$REPO/releases/$RID/assets?access_token=$TOKEN&name=$NAME_ENC")
-if echo "$RESP" | grep -q '"attach_url"'; then
-  URL=$(echo "$RESP" | pyjq attach_url)
-  echo "    上传成功：$URL"
-else
-  echo "    附件接口未成功（Gitee 未官方开放该接口），响应：$RESP"
-  echo "    请手动上传：打开 https://gitee.com/$OWNER/$REPO/releases/$TAG/edit 拖入 $EXE"
+- 下载 \`多线程下载工具.exe\` 双击即可运行（约 24MB，无需 Python）
+- 支持多线程分片、断点续传、限速、线程速度可视化、关闭最小化到托盘
+- 源码即 master 分支，$TAG 标签对应当前提交
+EOF
 fi
-
-echo "==> 完成。发行页：https://gitee.com/$OWNER/$REPO/releases/tag/$TAG"
+python release_publish.py "$TAG" build/rel_title.txt build/rel_body.txt
+rm -f build/rel_title.txt build/rel_body.txt
