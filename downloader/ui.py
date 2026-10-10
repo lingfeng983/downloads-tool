@@ -529,7 +529,7 @@ class MainWindow(QMainWindow):
         self._open_timer = QTimer(self, interval=700, timeout=self._flush_open)
         self._open_timer.setSingleShot(True)
         self.setWindowTitle("多线程下载工具")
-        self.setWindowIcon(QIcon(resource_path("icon.png")))
+        # 窗口图标跟随 QApplication 的多尺寸 ico（在 __main__ 里设置），保证任务栏一致
         self.resize(1180, 640)
         self.setStyleSheet(STYLE)
         self._build_ui()

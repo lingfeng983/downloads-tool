@@ -10,10 +10,12 @@ DROP_PREFIXES = (
     'opengl32sw', 'd3dcompiler_47', 'libglesv2', 'libegl', 'vlc',
 )
 
-# 插件目录只保留 Windows 平台插件与原生样式插件
+# 插件目录只保留 Windows 平台插件、原生样式插件与图标解码插件
+# （qico 必须保留：应用图标用多尺寸 .ico，缺它 QIcon 读不了 ico，任务栏会退回默认图标）
 KEEP_PLUGINS = (
     'platforms/qwindows',
     'styles/qwindowsvistastyle',
+    'imageformats/qico',
 )
 
 
@@ -38,7 +40,7 @@ a = Analysis(
     ['app.py'],
     pathex=['.'],
     binaries=[],
-    datas=[('assets/icon.png', 'assets')],
+    datas=[('assets/icon.png', 'assets'), ('assets/icon.ico', 'assets')],
     hiddenimports=[],
     hookspath=[],
     runtime_hooks=[],
