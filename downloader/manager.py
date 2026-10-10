@@ -138,8 +138,13 @@ class DownloadManager:
     # ---------- 监控线程 ----------
 
     def start_monitor(self):
-        if not self._monitor.is_alive():
-            self._monitor.start()
+        if self._monitor.is_alive():
+            return
+        # shutdown 后线程对象不能再 start()，重建线程并复位停止标记以支持复用
+        self._stop.clear()
+        self._monitor = threading.Thread(target=self._monitor_loop, daemon=True,
+                                         name="dl-monitor")
+        self._monitor.start()
 
     def _monitor_loop(self):
         while not self._stop.wait(1.0):
