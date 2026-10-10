@@ -6,7 +6,7 @@ from PyQt5.QtCore import QObject, pyqtSignal
 
 class AddWorker(QObject):
     done = pyqtSignal(str, str)      # url, file_name
-    failed = pyqtSignal(str)         # error message
+
     finished = pyqtSignal(int, str)  # 成功数量, 失败摘要
 
     def __init__(self, manager):

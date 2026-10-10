@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
 from . import config
 from .info import TaskStatus
 from .manager import DownloadManager
-from .update import CHECK_INTERVAL, UpdateWorker
+from .update import CHECK_INTERVAL, UpdateWorker, is_frozen_exe
 from .util import format_size, format_speed, resource_path
 from .worker import AddWorker
 
@@ -313,6 +313,9 @@ class ThreadDetailDialog(QDialog):
             f"{live} 个传输中，总速度 {format_speed(snap['speed'])}")
         if len(chunks) != self.table.rowCount():
             self.table.setRowCount(len(chunks))
+            # setRowCount 缩行时 Qt 会连同 cellWidget 一起删除旧进度条，
+            # 缓存里留下失效的 C++ 包装对象，下次 .get(r) 取到就 setValue 崩溃
+            self._bars.clear()
         for r, c in enumerate(chunks):
             state = "已完成" if c["finished"] else ("传输中" if c["speed"] > 0 else "等待/停滞")
             state_item = QTableWidgetItem(state)
@@ -448,7 +451,7 @@ class UpdateDialog(QDialog):
             self._cancelling = True
             self.worker.cancel_download()
             self.dl_btn.setEnabled(False)
-            self.bar.setText("正在取消…")
+            self.bar.setFormat("正在取消…")
             return
         url = self.info.get("download_url")
         if not url:
@@ -465,17 +468,25 @@ class UpdateDialog(QDialog):
         self._cancelling = False
         self.bar.setVisible(True)
         self.bar.setFormat("准备下载…")
-        self.worker.start_download(url, self.info.get("file_name") or "update.exe")
+        self.worker.start_download(url, self.info.get("file_name") or "update.exe",
+                                   self.info.get("sha256") or "")
+
+    def reject(self):
+        # 关闭对话框 = 取消后台下载，否则线程继续下载、完成后凭空弹模态框
+        if self.worker is not None:
+            self.worker.cancel_download()
+        super().reject()
 
     def _on_progress(self, done: int, total: int):
         if total > 0:
             self.bar.setValue(int(done * 1000 / total))
-            self.bar.setText(f"{format_size(done)} / {format_size(total)}")
+            self.bar.setFormat(f"{format_size(done)} / {format_size(total)}")
         else:
             self.bar.setRange(0, 0)
-            self.bar.setText(f"已下载 {format_size(done)}")
+            self.bar.setFormat(f"已下载 {format_size(done)}")
 
     def _on_done(self, path: str):
+        self.worker = None
         self.downloaded_path = path
         self.bar.setRange(0, 1000)
         self.bar.setValue(1000)
@@ -483,6 +494,8 @@ class UpdateDialog(QDialog):
         self.accept()
 
     def _on_failed(self, msg: str):
+        self.worker = None                   # 复位：否则按钮永远走"取消"分支无法重试
+        self.dl_btn.setEnabled(True)
         self.bar.setVisible(False)
         self.dl_btn.setText("立即下载更新")
         self.dl_btn.setObjectName("Primary")
@@ -521,7 +534,6 @@ class MainWindow(QMainWindow):
         self.mgr.start_monitor()
         self.done_sig.connect(self._handle_done)
         self.mgr.set_on_task_done(self.done_sig.emit)
-        self.row_by_url: dict[str, int] = {}
         self._row_urls: list[str] = []      # 当前表格里的 url 顺序
         self._cells: list[dict] = []        # 每行的可复用控件，避免整表重建
         self._detail: ThreadDetailDialog | None = None
@@ -593,6 +605,9 @@ class MainWindow(QMainWindow):
         from . import __version__
         w = UpdateWorker(__version__)
         w.checked.connect(lambda info: self._on_update_checked(info, manual))
+        # _spawn 兜底只 emit download_failed：检查线程若抛异常，checked 永不发出，
+        # 不复位则 _update_worker 永远非 None，之后所有检查直接 return
+        w.download_failed.connect(lambda msg: setattr(self, "_update_worker", None))
         self._update_worker = w
         w.check()
 
@@ -651,7 +666,7 @@ class MainWindow(QMainWindow):
                 update_mod.apply_update(path, info, self)
                 self._quit()
                 return
-        self._shell_open(path, must_dir=False)
+        self._shell_open(path, must_dir=True)   # 只打开所在目录，绝不直接执行下载来的 exe
         self.status_bar.showMessage(f"新版本已保存: {path}")
 
     # ---------- UI ----------
@@ -791,8 +806,8 @@ class MainWindow(QMainWindow):
             icon = self.style().standardIcon(QStyle.SP_ArrowDown)
         tray = QSystemTrayIcon(icon, self)
         tray.setToolTip("多线程下载工具")
-        menu = QMenu()
-        menu.addAction("显示主界面", self._show_from_tray)
+        menu = QMenu(self)                    # 挂 parent：setContextMenu 不接管所有权，
+        menu.addAction("显示主界面", self._show_from_tray)   # 局部变量会被 GC 成悬挂指针
         menu.addSeparator()
         menu.addAction("退出", self._quit)
         tray.setContextMenu(menu)
@@ -847,14 +862,14 @@ class MainWindow(QMainWindow):
 
     def _persist_options(self):
         save_dir = self.dir_edit.text().strip()
+        if save_dir:
+            self._remember_dir(save_dir)      # 先更新内存中的 recent_dirs，再一并落盘
         self.mgr.update_settings(
             save_dir=save_dir,
             recent_dirs=self.mgr.settings.get("recent_dirs") or [],
             thread_count=int(self.thread_combo.currentText()),
             speed_limit=self.limit_combo.currentData() or 0,
             auto_open=self.auto_open.isChecked())
-        if save_dir:
-            self._remember_dir(save_dir)
 
     def _start_download(self):
         lines = [ln.strip() for ln in
@@ -911,7 +926,6 @@ class MainWindow(QMainWindow):
     def _rebuild_rows(self, snaps):
         """只在任务集合或顺序变化时重建控件"""
         self._row_urls = [s["url"] for s in snaps]
-        self.row_by_url = {s["url"]: i for i, s in enumerate(snaps)}
         self.table.setRowCount(len(snaps))
         self._cells = []
         for r, s in enumerate(snaps):
@@ -1016,7 +1030,8 @@ class MainWindow(QMainWindow):
     def _cancel(self, url):
         if QMessageBox.question(
                 self, "确认",
-                "确定移除该任务吗？将删除其所有临时分片目录及未完成的残留文件。") \
+                "确定移除该任务吗？将删除其所有临时分片目录及未完成的残留文件。",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) \
                 == QMessageBox.Yes:
             self.mgr.cancel(url)
         self._update_table()
@@ -1033,10 +1048,14 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 pass
             self._detail.deleteLater()
-        self._detail = ThreadDetailDialog(self, url, self)
-        self._detail.setAttribute(Qt.WA_DeleteOnClose, True)
-        self._detail.destroyed.connect(lambda: setattr(self, "_detail", None))
-        self._detail.show()
+        dlg = ThreadDetailDialog(self, url, self)
+        dlg.setAttribute(Qt.WA_DeleteOnClose, True)
+        # 闭包捕获 dlg 做身份判断：旧对话框的 deleteLater 异步触发时，
+        # self._detail 可能已指向新对话框，不能盲目清空
+        dlg.destroyed.connect(
+            lambda *_: setattr(self, "_detail", None) if self._detail is dlg else None)
+        self._detail = dlg
+        dlg.show()
 
     def _on_double_click(self, row, _col):
         url = self._row_urls[row] if 0 <= row < len(self._row_urls) else None
@@ -1098,18 +1117,22 @@ class MainWindow(QMainWindow):
         不再 fork explorer /select —— 后者启动 explorer.exe 常要1~3 秒。"""
         if not path:
             return
-        target = os.path.normpath(path)
-        if must_dir or os.path.isdir(target) or not os.path.exists(target):
-            target = target if os.path.isdir(target) else (
-                os.path.dirname(target) or target)
-        final = target
+        if path.startswith(("http://", "https://")):
+            final = path                       # URL 原样交给 Shell，禁止路径归一化
+        else:
+            target = os.path.normpath(path)
+            if must_dir or os.path.isdir(target) or not os.path.exists(target):
+                target = target if os.path.isdir(target) else (
+                    os.path.dirname(target) or target)
+            final = target
 
         def run():
             try:
                 if sys.platform == "win32":
-                    if not os.path.exists(final):
+                    if not os.path.exists(final) and not final.startswith(
+                            ("http://", "https://")):
                         os.makedirs(final, exist_ok=True)
-                    os.startfile(final)              # 目录/文件都直接交给 Shell
+                    os.startfile(final)          # 目录/文件/URL 都交给 Shell
                 elif sys.platform == "darwin":
                     subprocess.Popen(["open", final])
                 else:
