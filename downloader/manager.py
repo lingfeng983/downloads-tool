@@ -62,11 +62,12 @@ class DownloadManager:
                 TaskStatus.DOWNLOADING, TaskStatus.PAUSED, TaskStatus.WAITING)
         if occupied:
             raise ValueError("该URL已在下载列表中")
-        if old is not None:
-            # 已结束(完成/取消/错误)的历史任务让位重下
-            self.cancel(url)
         info = build_info(url, save_dir or self.save_dir,
                           thread_count or self.default_thread_count)
+        if old is not None:
+            # 已结束(完成/取消/错误)的历史任务让位重下；
+            # 放在 build_info 之后：探测失败时旧条目不至于被误删
+            self.cancel(url)
         task = DownloadTask(info, self.limiter)
         task._on_done = self._done_callback
         with self._lock:
@@ -149,7 +150,11 @@ class DownloadManager:
     def _monitor_loop(self):
         while not self._stop.wait(1.0):
             for t in self.tasks():
-                t.tick_speed()
+                try:
+                    t.tick_speed()
+                except Exception:
+                    # 单任务异常不能带崩监控线程：否则速度刷新与每秒持久化全部停摆
+                    logger.exception("监控任务速度失败: %s", t.url)
             self.save_state()
 
     def shutdown(self):

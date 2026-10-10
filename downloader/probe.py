@@ -82,7 +82,7 @@ def extract_filename(url: str, headers: dict) -> str:
 
 def probe(url: str) -> FileInfo:
     """HEAD 探测，失败时回退 GET Range 探测"""
-    headers = {"User-Agent": USER_AGENT}
+    headers = {"User-Agent": USER_AGENT, "Accept-Encoding": "identity"}
     size, support_range = -1, False
     try:
         r = requests.head(url, headers=headers, timeout=TIMEOUT, allow_redirects=True)
@@ -90,7 +90,8 @@ def probe(url: str) -> FileInfo:
             size = _to_int(r.headers.get("Content-Length"), -1)
             support_range = r.headers.get("Accept-Ranges", "").lower() == "bytes"
         if size > 0:
-            return FileInfo(extract_filename(url, r.headers), size, support_range)
+            # 文件名取重定向后的最终 URL（短链/网盘跳转后的真实名字）
+            return FileInfo(extract_filename(r.url, r.headers), size, support_range)
     except requests.RequestException:
         pass
 
@@ -112,7 +113,7 @@ def probe(url: str) -> FileInfo:
             support_range = True
         elif r.ok:
             size = _to_int(r.headers.get("Content-Length"), -1)
-        return FileInfo(extract_filename(url, r.headers), size, support_range)
+        return FileInfo(extract_filename(r.url, r.headers), size, support_range)
     finally:
         r.close()
 

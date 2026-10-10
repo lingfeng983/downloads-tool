@@ -1,6 +1,7 @@
 """下载任务：分片线程、自动重试、进度续传与合并"""
 import logging
 import os
+import re
 import shutil
 import socket
 import threading
@@ -21,6 +22,16 @@ READ_TIMEOUT = 15# 单次 socket 读超时。配合 _abort_responses() 的主动
 STOP_JOIN_TIMEOUT = 6.0    # 停止分片线程的**总**等待预算（秒），非每线程
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+
+
+def _parse_content_range(value: str) -> tuple | None:
+    """解析 'bytes 100-999/1234' → (start, total)；total 未知（*）为 -1；失败 None"""
+    if not value:
+        return None
+    m = re.match(r"bytes\s+(\d+)-(\d+)/(\d+|\*)", value.strip(), re.IGNORECASE)
+    if not m:
+        return None
+    return (int(m.group(1)), -1 if m.group(3) == "*" else int(m.group(3)))
 
 
 @dataclass
@@ -156,8 +167,13 @@ class DownloadTask:
         d = parts_dir(self.info.save_path)
         if not os.path.isdir(d):
             return 0
-        return sum(os.path.getsize(os.path.join(d, f))
-                   for f in os.scandir(d) if f.name.endswith(".part"))
+        try:
+            return sum(os.path.getsize(os.path.join(d, f))
+                       for f in os.scandir(d) if f.name.endswith(".part"))
+        except OSError:
+            # isdir 通过后目录可能被并发 cancel() 删除；异常若传到监控线程
+            # 会连带 _monitor_loop 死掉（速度/持久化全部停摆）
+            return 0
 
     def progress(self) -> float:
         if self.info.total_size > 0:
@@ -218,7 +234,9 @@ class DownloadTask:
                 self.info.status = TaskStatus.ERROR
                 return
         with self._lock:
-            if self.info.status == TaskStatus.DOWNLOADING:
+            # CANCELLED 的任务不允许复活：cancel() 与 start() 并发时，
+            # 若在这里 clear 掉取消标志，任务会带着 CANCELLED 状态继续下载
+            if self.info.status in (TaskStatus.DOWNLOADING, TaskStatus.CANCELLED):
                 return
             self._cancelled.clear()
             self._paused.set()
@@ -238,15 +256,19 @@ class DownloadTask:
                                      name=f"dl-{self.info.file_name}-{c.cid}")
                 self._threads.append(t)
                 t.start()
-            if not self._threads:
-                self._finalize()
+            need_finalize = not self._threads
+        if need_finalize:
+            # 必须在锁外调用：_finalize 内部也拿 self._lock（非重入），
+            # 锁内调用会同线程二次加锁直接死锁（场景：分片已在磁盘完整但未合并）
+            self._finalize()
 
     def pause(self):
-        if self.info.status != TaskStatus.DOWNLOADING:
-            return
-        self._paused.clear()
-        self.info.status = TaskStatus.PAUSED
-        # 等待线程落盘退出，防止与续传线程重叠写
+        with self._lock:
+            if self.info.status != TaskStatus.DOWNLOADING:
+                return
+            self.info.status = TaskStatus.PAUSED
+            self._paused.clear()
+        # 等待线程落盘退出，防止与续传线程重叠写（join 不持锁，避免拖死其他操作）
         if not self._stop_threads(timeout=STOP_JOIN_TIMEOUT):
             logger.warning("pause() 超时：%s 个分片线程仍在运行", len(self._live_threads()))
 
@@ -276,7 +298,7 @@ class DownloadTask:
         """取消并清理该任务的所有临时文件（.parts 目录、半截文件；保留已完成的最终文件）"""
         self._cancelled.set()
         self._paused.set()
-        stopped = self._stop_threads()
+        stopped = self._stop_threads()    # join 不持锁
         # 线程仍在写时不能删目录，否则它们会重建文件/写入失败；
         # 目录残留由 shutdown() 兜底清理。
         if stopped:
@@ -289,10 +311,10 @@ class DownloadTask:
         else:
             logger.warning("cancel() 超时：%s 个分片线程仍在运行，延后清理临时文件",
                            len(self._live_threads()))
-            self.info.status = TaskStatus.CANCELLED
-        self._chunks = []
-        if self.info.status != TaskStatus.COMPLETED:
-            self.info.status = TaskStatus.CANCELLED
+        with self._lock:
+            self._chunks = []
+            if self.info.status != TaskStatus.COMPLETED:
+                self.info.status = TaskStatus.CANCELLED
 
     def shutdown(self):
         self._paused.set()
@@ -302,10 +324,13 @@ class DownloadTask:
     def _abort_responses(self):
         """中断所有在途连接，让阻塞在 socket 读上的线程立刻醒来退出。
 
-        关键点：**不能直接调 r.close() 同步等待**。close() 会等读操作返回，
-        在服务端不发数据时实测要等 13 秒，反而把「暂停」又变成了长时间卡顿。
-        正确做法是对底层 socket 先 shutdown(SHUT_RDWR)，它会立刻让阻塞的
-        recv 返回错误；close() 留到后台线程做清理。
+        实测（Windows + Python 3.14）：
+        - shutdown(SHUT_RDWR) 对"无未读数据"的阻塞 recv **不生效**（会挂到
+          读超时），而且 shutdown 之后再 close 也无法中断挂起的 recv；
+        - 普通 sock.close() 因 http.client 的 makefile 引用（_io_refs）只减
+          计数、不真正关闭 fd；
+        - 唯一可靠的是 `_real_close()` 直接 closesocket，阻塞的 recv 立刻以
+          OSError(10038) 醒来。响应对象的收尾交给后台线程 r.close()。
         """
         with self._lock:
             items = list(self._responses.values())
@@ -315,10 +340,17 @@ class DownloadTask:
         for r in items:
             sock = _raw_socket(r)
             if sock is not None:
-                try:
-                    sock.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass
+                real_close = getattr(sock, "_real_close", None)
+                if real_close is not None:
+                    try:
+                        real_close()
+                    except OSError:
+                        pass
+                else:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
         def _close_all():
             for r in items:
                 try:
@@ -363,6 +395,9 @@ class DownloadTask:
     def _run_chunk(self, chunk: Chunk):
         sess = requests.Session()
         sess.headers["User-Agent"] = UA
+        # 禁止传输层压缩：requests 默认带 Accept-Encoding: gzip 且透明解压，
+        # 解压后字节数 ≠ Range 偏移，分片文件会超出 length 且内容错位 → 合并损坏
+        sess.headers["Accept-Encoding"] = "identity"
         retries = 0
         try:
             while retries < MAX_RETRIES:
@@ -376,20 +411,34 @@ class DownloadTask:
                 range_ok = chunk.end >= 0 and self.info.support_range
                 if range_ok:
                     headers["Range"] = f"bytes={chunk.start + cur}-{chunk.end}"
+                before = chunk.written
                 try:
                     r = sess.get(self.info.url, headers=headers, stream=True,
                                  timeout=(10, READ_TIMEOUT), allow_redirects=True)
                     self._track_response(r)
                     try:
                         with r:
-                            if range_ok and r.status_code == 200 \
-                                    and "Content-Range" not in r.headers:
+                            if range_ok and r.status_code == 200:
                                 # 服务器忽略 Range：整个任务降级为单线程整文件下载
+                                # （无论有没有 Content-Range，200 响应体都是从 0 开始的完整内容）
                                 if not self._convert_single(chunk):
                                     return
                                 continue
+                            if r.status_code == 206:
+                                # 续传前校验 Content-Range 与本地记录一致，
+                                # 防止远端文件已变更（大小/偏移不同）导致新旧内容错位拼接
+                                cr = _parse_content_range(r.headers.get("Content-Range"))
+                                if cr is not None:
+                                    cstart, ctotal = cr
+                                    if cstart != chunk.start + cur or (
+                                            ctotal > 0 and self.info.total_size > 0
+                                            and ctotal != self.info.total_size):
+                                        self._fail("远端文件已变化（Content-Range 与本地记录不符），"
+                                                   "请移除任务后重新添加")
+                                        return
                             if r.status_code not in (200, 206):
-                                raise requests.HTTPError(f"HTTP {r.status_code}")
+                                raise requests.HTTPError(f"HTTP {r.status_code}",
+                                                         response=r)
                             mode = "wb" if cur == 0 or not range_ok else "ab"
                             if mode == "wb" and cur > 0:
                                 cur = 0  # 不支持续传则重写
@@ -418,7 +467,21 @@ class DownloadTask:
                 except (requests.RequestException, OSError) as e:
                     if self._cancelled.is_set() or not self._paused.is_set():
                         return
-                    retries += 1
+                    if isinstance(e, requests.HTTPError) and e.response is not None \
+                            and e.response.status_code in (400, 401, 403, 404, 410):
+                        # 永久性错误重试无意义（原实现会退避重试 5 次共约 1 分钟）
+                        self._fail(f"HTTP {e.response.status_code}："
+                                   f"服务器拒绝该请求（链接失效或需要权限）")
+                        return
+                    if isinstance(e, OSError) and not isinstance(
+                            e, (requests.RequestException, ConnectionError)):
+                        # 裸 OSError 基本是本地写盘问题（磁盘满/权限），重试不会好转
+                        self._fail(f"本地写入失败: {e}")
+                        return
+                    if chunk.written > before:
+                        retries = 0      # 本次连接有实际进展，只统计连续无进展的失败
+                    else:
+                        retries += 1
                     self.error_msg = f"{type(e).__name__}: {e}（第 {retries} 次重试）"
                     self._backoff(min(2 ** retries, 30))
                     continue
@@ -434,7 +497,7 @@ class DownloadTask:
                 if chunk.is_done():
                     self._mark_done(chunk)
                     return
-                retries += 1
+                retries = 0 if chunk.written > before else retries + 1
                 self.error_msg = f"连接中断，已重连重试（{retries}/{MAX_RETRIES}）"
                 self._backoff(min(2 ** retries, 30))
 
@@ -513,6 +576,7 @@ class DownloadTask:
                     os.replace(self._chunks[0].path, target)
                     remove_dir(parts_dir(target))
                 else:
+                    total_written = 0
                     with open(target, "wb") as out:
                         for c in sorted(self._chunks, key=lambda x: x.cid):
                             # length<=0 的分片本就不该存在（split_ranges 已裁掉），
@@ -520,8 +584,18 @@ class DownloadTask:
                             if c.length == 0 or not os.path.exists(c.path):
                                 logger.warning("合并时跳过分片 %s（文件缺失）", c.cid)
                                 continue
+                            if c.length > 0 and os.path.getsize(c.path) != c.length:
+                                # 分片字节数与预期不符（如传输层被压缩/远端文件变更），
+                                # 合并只会产出损坏文件，宁可报错也不静默损坏
+                                raise OSError(
+                                    f"分片 {c.cid} 大小不符（{os.path.getsize(c.path)}"
+                                    f"/{c.length}），已放弃合并")
                             with open(c.path, "rb") as f:
                                 shutil.copyfileobj(f, out, 1024 * 1024)
+                            total_written += c.length
+                    if self.info.total_size > 0 and total_written != self.info.total_size:
+                        raise OSError(
+                            f"合并总量 {total_written} 与文件大小 {self.info.total_size} 不符")
                     remove_dir(parts_dir(target))
             self.info.status = TaskStatus.COMPLETED
             self.info.total_size = max(self.info.total_size, self._target_size())
