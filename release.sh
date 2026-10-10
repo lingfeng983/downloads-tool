@@ -27,9 +27,13 @@ git fetch -q origin master --tags || die "无法访问 origin（网络/凭证问
 
 TAG="${1:-}"
 if [ -z "$TAG" ]; then
-  max="$(git ls-remote --tags origin | sed -n 's|.*refs/tags/v\([0-9]\{1,\}\)[0-9.]*$|\1|p' | sort -n | tail -1)"
-  [ -n "$max" ] || die "origin 上没有 vN 标签，请显式传入 tag，如 ./release.sh v3"
-  TAG="v$((max + 1))"
+  # tag 与 downloader/__init__.py 的 __version__ 对齐（在线更新按版本号比较）
+  ver="$(python -c "import downloader;print(downloader.__version__)")"
+  [ -n "$ver" ] || die "无法读取 downloader.__version__"
+  TAG="v$ver"
+  if git ls-remote --tags origin "refs/tags/$TAG" | grep -q "refs/tags/$TAG"; then
+    die "标签 $TAG 已存在：发新版前请先更新 downloader/__init__.py 的 __version__（并同步 version.txt）"
+  fi
 fi
 TITLE="${2:-多线程下载工具 ${TAG}}"
 

@@ -63,7 +63,9 @@ def test_window_refresh(app):
     out = tempfile.mkdtemp(prefix="dluiout_")
     win.dir_edit.setText(out)
     url = f"http://127.0.0.1:{port}/blob"
-    win.mgr.set_speed_limit(400 * 1024)      # 限速，让下载持续足够久以便采样
+    win.mgr.set_speed_limit(64 * 1024)       # 限速，让下载持续足够久以便采样
+    # （3MB / ~64KB/s 远大于下方 12×0.35s 的采样窗口；限速偏高时下载会在
+    #   采样结束前完成，断言拿到的全是归零速度，成为随机器快慢的偶发失败）
     task = win.mgr.add_download(url, out, thread_count=4)
 
     # 多次增量刷新：任务集合不变时不应重建控件

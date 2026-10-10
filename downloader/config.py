@@ -24,6 +24,10 @@ DEFAULT_SETTINGS = {
     "thread_count": 8,
     "speed_limit": 0,
     "auto_open": False,
+    # 在线更新（Gitee 发行版）：上次检查时间 / 已跳过的版本 / 永久忽略更新提示
+    "last_update_check": 0.0,
+    "skipped_update_version": "",
+    "update_ignored": False,
 }
 
 DATA_DIR = DEFAULT_DATA_DIR

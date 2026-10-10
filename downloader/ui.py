@@ -2,6 +2,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, pyqtSlot, QRectF
 from PyQt5.QtGui import QColor, QFont, QBrush, QIcon, QPainter, QPen
@@ -16,6 +17,7 @@ from PyQt5.QtWidgets import (
 from . import config
 from .info import TaskStatus
 from .manager import DownloadManager
+from .update import CHECK_INTERVAL, UpdateWorker
 from .util import format_size, format_speed, resource_path
 from .worker import AddWorker
 
@@ -397,6 +399,117 @@ class RowActions(QWidget):
         self._apply(self.danger, sig[1], sig[3])
 
 
+class UpdateDialog(QDialog):
+    """在线更新对话框：展示新版说明，一键下载并替换当前 exe"""
+
+    def __init__(self, info: dict, parent: "MainWindow" = None):
+        super().__init__(parent)
+        self.info = info
+        self.win = parent
+        self.worker = None
+        self.downloaded_path = ""
+        self.setWindowTitle("发现新版本")
+        self.resize(520, 430)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 14, 16, 12)
+        lay.setSpacing(8)
+
+        head = QLabel(f"当前版本 v{info.get('local_version', '')} → "
+                      f"新版本 v{info.get('version', '')}（{info.get('tag', '')}）")
+        head.setStyleSheet("font-weight: bold; color: #1d4ed8; font-size: 14px;")
+        lay.addWidget(head)
+
+        notes = QPlainTextEdit()
+        notes.setReadOnly(True)
+        notes.setPlainText(info.get("body") or "（发行版无说明）")
+        lay.addWidget(notes, 1)
+
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 1000)
+        self.bar.setTextVisible(True)
+        self.bar.setFormat("准备下载…")
+        self.bar.setVisible(False)
+        lay.addWidget(self.bar)
+
+        btns = QHBoxLayout()
+        btns.setSpacing(8)
+        self.dl_btn = QPushButton("立即下载更新")
+        self.dl_btn.setObjectName("Primary")
+        self.dl_btn.clicked.connect(self._start_download)
+        btns.addWidget(self.dl_btn)
+        btns.addWidget(QPushButton("查看发布页", clicked=self._open_page))
+        btns.addWidget(QPushButton("忽略此版本", clicked=self._skip_version))
+        btns.addWidget(QPushButton("不再提示", clicked=self._ignore_updates))
+        lay.addLayout(btns)
+
+    def _start_download(self):
+        if self.worker is not None:          # 下载中 → 该按钮作为取消
+            self._cancelling = True
+            self.worker.cancel_download()
+            self.dl_btn.setEnabled(False)
+            self.bar.setText("正在取消…")
+            return
+        url = self.info.get("download_url")
+        if not url:
+            QMessageBox.warning(self, "提示", "该发行版没有可用的 exe 附件，请打开发布页手动下载。")
+            return
+        self.worker = UpdateWorker(self.info.get("local_version") or "")
+        self.worker.download_progress.connect(self._on_progress)
+        self.worker.download_done.connect(self._on_done)
+        self.worker.download_failed.connect(self._on_failed)
+        self.dl_btn.setText("取消下载")
+        self.dl_btn.setObjectName("")
+        self.dl_btn.style().unpolish(self.dl_btn)
+        self.dl_btn.style().polish(self.dl_btn)
+        self._cancelling = False
+        self.bar.setVisible(True)
+        self.bar.setFormat("准备下载…")
+        self.worker.start_download(url, self.info.get("file_name") or "update.exe")
+
+    def _on_progress(self, done: int, total: int):
+        if total > 0:
+            self.bar.setValue(int(done * 1000 / total))
+            self.bar.setText(f"{format_size(done)} / {format_size(total)}")
+        else:
+            self.bar.setRange(0, 0)
+            self.bar.setText(f"已下载 {format_size(done)}")
+
+    def _on_done(self, path: str):
+        self.downloaded_path = path
+        self.bar.setRange(0, 1000)
+        self.bar.setValue(1000)
+        self.win._apply_update(path, self.info)
+        self.accept()
+
+    def _on_failed(self, msg: str):
+        self.bar.setVisible(False)
+        self.dl_btn.setText("立即下载更新")
+        self.dl_btn.setObjectName("Primary")
+        self.dl_btn.style().unpolish(self.dl_btn)
+        self.dl_btn.style().polish(self.dl_btn)
+        if not self._cancelling:
+            QMessageBox.warning(self, "下载失败", msg)
+
+    def _open_page(self):
+        url = self.info.get("page_url")
+        if url:
+            self.win._shell_open(url)
+
+    def _skip_version(self):
+        self.win.mgr.update_settings(
+            skipped_update_version=self.info.get("version", ""))
+        self.reject()
+
+    def _ignore_updates(self):
+        box = QMessageBox.question(
+            self, "不再提示",
+            "今后启动时不再检查新版本？（仍可通过 设置→检查更新 手动检查）",
+            QMessageBox.Yes | QMessageBox.No)
+        if box == QMessageBox.Yes:
+            self.win.mgr.update_settings(update_ignored=True)
+            self.reject()
+
+
 class MainWindow(QMainWindow):
     done_sig = pyqtSignal(str)
 
@@ -424,6 +537,11 @@ class MainWindow(QMainWindow):
         self._worker = AddWorker(self.mgr)
         self._worker.done.connect(self._on_added)
         self._worker.finished.connect(self._on_batch_finished)
+        self._update_worker = None
+        self._update_dialog = None
+        self._update_timer = QTimer(self, interval=3000, singleShot=True,
+                                    timeout=self._auto_check_update)
+        self._update_timer.start()
         self.tray = self._make_tray()
         self._quitting = False
         self._tray_hint_shown = False
@@ -437,6 +555,8 @@ class MainWindow(QMainWindow):
         act = menu.addAction("配置文件保存位置…")
         act.triggered.connect(self._choose_data_dir)
         menu.addAction("打开配置文件夹", lambda: self._shell_open(config.DATA_DIR))
+        menu.addSeparator()
+        menu.addAction("检查更新…", lambda: self._check_update(manual=True))
 
     def _choose_data_dir(self):
         d = QFileDialog.getExistingDirectory(
@@ -451,6 +571,87 @@ class MainWindow(QMainWindow):
             self, "完成",
             f"配置文件将保存到:\n{config.DATA_DIR}\n\n"
             "该位置已记住；启动时加 --data-dir 参数可临时覆盖。")
+
+    # ---------- 在线更新（Gitee 发行版） ----------
+
+    def _auto_check_update(self):
+        s = self.mgr.settings
+        if s.get("update_ignored"):
+            return
+        if time.time() - float(s.get("last_update_check") or 0) < CHECK_INTERVAL:
+            return
+        self._check_update(manual=False)
+
+    def _check_update(self, manual: bool):
+        if self._update_worker is not None:
+            if manual:
+                self.status_bar.showMessage("正在检查更新…")
+            return
+        if manual:
+            self.status_bar.showMessage("正在检查更新…")
+        from . import __version__
+        w = UpdateWorker(__version__)
+        w.checked.connect(lambda info: self._on_update_checked(info, manual))
+        self._update_worker = w
+        w.check()
+
+    def _on_update_checked(self, info: dict, manual: bool):
+        self._update_worker = None
+        self.mgr.update_settings(last_update_check=time.time())
+        if not info.get("ok"):
+            if manual:
+                self.status_bar.showMessage("检查更新失败")
+                QMessageBox.warning(self, "检查更新", info.get("error") or "检查更新失败")
+            return
+        if not info.get("available"):
+            if manual:
+                self.status_bar.showMessage("已是最新版本")
+                QMessageBox.information(self, "检查更新",
+                                        f"当前已是最新版本（v{info.get('local_version', '')}）。")
+            return
+        if (info.get("version")
+                == self.mgr.settings.get("skipped_update_version")
+                and not manual):
+            return
+        if manual:
+            self.status_bar.showMessage(f"发现新版本 {info.get('tag', '')}")
+            self._show_update_dialog(info)
+        elif self.tray:
+            self.tray.showMessage(
+                "发现新版本 " + str(info.get("tag", "")),
+                "可在 设置 → 检查更新 中下载，或直接运行新版程序",
+                QSystemTrayIcon.Information, 8000)
+            self._show_update_dialog(info)
+        else:
+            self._show_update_dialog(info)
+
+    def _show_update_dialog(self, info):
+        if self._update_dialog is not None:
+            try:
+                self._update_dialog.raise_()
+            except RuntimeError:
+                pass
+            return
+        dlg = UpdateDialog(info, self)
+        self._update_dialog = dlg
+        dlg.finished.connect(lambda _: setattr(self, "_update_dialog", None))
+        dlg.exec_() if not self.isVisible() else dlg.show()
+
+    def _apply_update(self, path: str, info: dict):
+        """下载完成：打包版写替换脚本并退出重启；其余情况打开所在目录"""
+        if is_frozen_exe():
+            box = QMessageBox.question(
+                self, "更新已下载",
+                "新版本已下载完成。是否立即退出并自动更新、重启新版？\n"
+                "选择稍后则新版程序会保存在下载目录，当前版本继续运行。",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+            if box == QMessageBox.Yes:
+                from . import update as update_mod
+                update_mod.apply_update(path, info, self)
+                self._quit()
+                return
+        self._shell_open(path, must_dir=False)
+        self.status_bar.showMessage(f"新版本已保存: {path}")
 
     # ---------- UI ----------
 
