@@ -5,6 +5,7 @@ tag 约定 vN / vN.N / vN.N.N，取其数字段做语义化比较；比较时把
 末尾的 .0 视作 2 段（"2.0.0" 对应标签 v2.0），避免等于最新 tag 的已发布包
 被误报为可更新。
 """
+import hashlib
 import json
 import logging
 import os
@@ -99,6 +100,8 @@ def fetch_update(local_version: str) -> dict:
     asset = exe_asset(rel)
     name = asset.get("name") or "新版本.exe"
     dl = asset.get("browser_download_url") or _asset_fallback_url(rel, name)
+    # 发行版正文里的 SHA256（release_publish.py 写入），下载完成后校验完整性
+    m = re.search(r"SHA256[:：]\s*([0-9a-fA-F]{64})", rel.get("body") or "")
     return {
         "ok": True,
         "available": True,
@@ -109,6 +112,7 @@ def fetch_update(local_version: str) -> dict:
         "page_url": html,
         "file_name": name,
         "download_url": dl,
+        "sha256": m.group(1).lower() if m else "",
     }
 
 
@@ -183,6 +187,21 @@ def apply_update(new_exe: str, info: dict, parent=None):
     return script
 
 
+def _silent_remove(path: str):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _file_sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for blk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(blk)
+    return h.hexdigest()
+
+
 class UpdateWorker(QObject):
     """检查与下载都在后台线程执行，信号回主线程"""
     checked = pyqtSignal(dict)
@@ -196,13 +215,15 @@ class UpdateWorker(QObject):
             from . import __version__ as local_version
         self.local_version = local_version
         self._cancel = False
+        self._expected_sha256 = ""
         self._thread = None
 
     def check(self):
         self._spawn("update-check", lambda: self._do_check())
 
-    def start_download(self, url: str, file_name: str):
+    def start_download(self, url: str, file_name: str, expected_sha256: str = ""):
         self._cancel = False
+        self._expected_sha256 = (expected_sha256 or "").lower()
         self._spawn("update-download", lambda: self._do_download(url, file_name))
 
     def cancel_download(self):
@@ -253,6 +274,13 @@ class UpdateWorker(QObject):
                         raise ValueError("下载体积超出预期，已中止")
                     self.download_progress.emit(done, total or -1)
             os.replace(tmp, dest)
+            if self._expected_sha256:
+                digest = self._file_sha256(dest)
+                if digest != self._expected_sha256:
+                    _silent_remove(dest)
+                    raise ValueError(
+                        f"安装包校验失败（SHA256 不匹配），已删除下载文件。"
+                        f"期望 {self._expected_sha256[:16]}…，实际 {digest[:16]}…")
             self.download_done.emit(dest)
         except Exception as e:
             try:

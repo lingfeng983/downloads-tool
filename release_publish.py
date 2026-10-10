@@ -10,6 +10,7 @@ title_file/body_file 为 UTF-8 编码的文本文件。
 （GBK 环境会把中文破坏成 U+FFFD）。
 """
 import glob
+import hashlib
 import json
 import os
 import sys
@@ -85,6 +86,19 @@ def upload_attachment(rid, exe):
     print("download=" + resp["browser_download_url"])
 
 
+def _body_has_sha(body: str, digest: str) -> bool:
+    return f"SHA256:{digest}" in body.replace(" ", "").replace("：", ":").lower()
+
+
+def _upsert_sha_line(body: str, digest: str) -> str:
+    """把 SHA256 行插入正文：已有一行就原位替换，否则追加到末尾"""
+    marker = "sha256:"
+    for line in body.splitlines():
+        if marker in line.replace(" ", "").replace("：", ":").lower():
+            return body.replace(line, f"SHA256: {digest}")
+    return (body.rstrip() + f"\n\nSHA256: {digest}").strip()
+
+
 def main():
     tag, title_file, body_file = sys.argv[1:4]
     with open(title_file, encoding="utf-8") as f:
@@ -96,6 +110,15 @@ def main():
     if not exes:
         sys.exit("no exe found in dist/")
     exe = max(exes, key=os.path.getmtime)
+
+    # 把 exe 的 SHA256 写进发行版说明，更新侧下载后校验，防发行版内容被篡改
+    sha = hashlib.sha256()
+    with open(exe, "rb") as f:
+        for blk in iter(lambda: f.read(1024 * 1024), b""):
+            sha.update(blk)
+    digest = sha.hexdigest()
+    if not _body_has_sha(body, digest):
+        body = _upsert_sha_line(body, digest)
 
     rel = get_release(tag)
     path = f"/repos/{OWNER}/{REPO}/releases"
