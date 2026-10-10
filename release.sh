@@ -33,8 +33,8 @@ if [ -z "$TAG" ]; then
   TAG="v$ver"
   if git ls-remote --tags origin "refs/tags/$TAG" | grep -q "refs/tags/$TAG"; then
     # 已存在的 tag 指向当前 HEAD 时复用（如发版中断后重跑）；否则才算冲突
-    remote_sha="$(git ls-remote --tags origin "refs/tags/$TAG" | sed -n 's|^\([0-9a-f]\{40\}\)	refs/tags/'"$TAG"'\^\{}$|\1|p')"
-    [ "$remote_sha" = "$(git rev-parse HEAD)" ] \
+    # （步骤 0 已 git fetch --tags，本地 tag 即远端状态）
+    [ "$(git rev-parse "$TAG^{commit}")" = "$(git rev-parse HEAD)" ] \
       || die "标签 $TAG 已存在且不指向当前提交：发新版前请先更新 downloader/__init__.py 的 __version__（并同步 version.txt）"
     echo "==> 标签 $TAG 已存在且指向当前提交，复用"
   fi
