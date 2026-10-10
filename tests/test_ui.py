@@ -8,18 +8,11 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import pytest
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtGui import QPixmap
 
 from downloader import config
-_TMP = tempfile.mkdtemp(prefix="dlui_")
-config.apply_data_dir(_TMP, remember=False)
-os.environ["DOWNLOADS_TOOL_DATA"] = _TMP
-# apply_data_dir 会把默认目录下的历史任务迁移过来，测试里要清空以保证隔离
-for _f in ("tasks.json", "settings.json"):
-    _p = os.path.join(_TMP, _f)
-    if os.path.isfile(_p):
-        os.remove(_p)
 
 from downloader.info import TaskStatus
 from downloader.ui import MainWindow, ThreadSpeedWidget, ThreadDetailDialog
@@ -27,8 +20,21 @@ from downloader.util import SpeedLimiter, format_speed
 from test_core import serve, wait
 
 
-def test_widgets_draw():
-    app = QApplication.instance() or QApplication([])
+@pytest.fixture(scope="session")
+def app():
+    # 目录隔离必须在测试运行时（而非 import 时）做：pytest 先收集全部模块
+    # 再运行，其他文件的 import/测试会在期间改写全局 DATA_DIR 并写入任务数据
+    config.apply_data_dir(tempfile.mkdtemp(prefix="dlui_"), remember=False)
+    os.environ["DOWNLOADS_TOOL_DATA"] = config.DATA_DIR
+    # apply_data_dir 会把旧目录的历史任务迁移过来，清空以保证隔离
+    for _f in ("tasks.json", "settings.json"):
+        _p = os.path.join(config.DATA_DIR, _f)
+        if os.path.isfile(_p):
+            os.remove(_p)
+    return QApplication.instance() or QApplication([])
+
+
+def test_widgets_draw(app):
     w = ThreadSpeedWidget()
     w.resize(132, 40)
     # 三种状态：未开始 / 混合速度 / 全部完成
@@ -50,7 +56,6 @@ def test_widgets_draw():
     w.render(pm3)
     assert not w.toolTip() or "线程" in w.toolTip()
     print("PASS test_widgets_draw")
-    return app
 
 
 def test_window_refresh(app):

@@ -14,6 +14,18 @@ from downloader.util import SpeedLimiter
 from downloader.info import DownloadInfo, TaskStatus
 from downloader.task import DownloadTask
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolated_data_dir():
+    """每个测试用独立的配置目录：任务完成会 save_state，避免污染其他测试
+    （import 期的目录隔离无效——pytest 先收集全部模块再运行测试）"""
+    from downloader import config
+    config.apply_data_dir(tempfile.mkdtemp(prefix="dlcfg_"), remember=False)
+    yield
+
+
 DATA = os.urandom(3 * 1024 * 1024)  # 3MB
 MD5 = hashlib.md5(DATA).hexdigest()
 _tmp = tempfile.mkdtemp(prefix="dltest_")
