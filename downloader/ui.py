@@ -64,7 +64,8 @@ QPushButton#Mini, QToolButton#Mini {
     padding: 5px 10px; font-size: 12px; border-radius: 6px;
     background: #ffffff; border: 1px solid #d5dce6; color: #334155; }
 QToolButton#Mini:hover { background: #eef2f7; }
-QToolButton#MenuButton#Mini::menu-indicator { width: 0; }
+/* 原生菜单指示箭头会溢出按钮边框（与文字中的"▾"重复），按 id 单选器隐藏 */
+QToolButton#Mini::menu-indicator { image: none; width: 0; height: 0; }
 QPushButton#RowPrimary { background: #e6f0ff; border: 1px solid #b8d3fb; color: #1d4ed8; }
 QPushButton#RowPrimary:hover { background: #d3e5fd; }
 QPushButton#RowDanger { background: #fff5f5; border: 1px solid #f3c3c3; color: #dc2626; }
