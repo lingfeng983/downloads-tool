@@ -9,7 +9,6 @@ title_file/body_file 为 UTF-8 编码的文本文件。
 注意：中文必须经 UTF-8 文件或原生 Unicode 路径传递，不能走 curl/控制台参数
 （GBK 环境会把中文破坏成 U+FFFD）。
 """
-import glob
 import hashlib
 import json
 import os
@@ -21,6 +20,9 @@ import uuid
 OWNER = "lingfeng983"
 REPO = "downloads-tool"
 API = "https://gitee.com/api/v5"
+
+PORTABLE_EXE = os.path.join("dist", "多线程下载工具.exe")
+INSTALLER_EXE = os.path.join("dist", "多线程下载工具安装包.exe")
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -106,12 +108,14 @@ def main():
     with open(body_file, encoding="utf-8") as f:
         body = f.read().strip()
 
-    exes = glob.glob(os.path.join("dist", "*.exe"))
-    if not exes:
-        sys.exit("no exe found in dist/")
-    exe = max(exes, key=os.path.getmtime)
+    # 免安装版 exe 必须存在；安装包版可选（Inno Setup 未装/未构建时跳过）
+    exes = [p for p in (PORTABLE_EXE, INSTALLER_EXE) if os.path.isfile(p)]
+    if PORTABLE_EXE not in exes:
+        sys.exit(f"portable exe not found: {PORTABLE_EXE}")
+    exe = PORTABLE_EXE
 
-    # 把 exe 的 SHA256 写进发行版说明，更新侧下载后校验，防发行版内容被篡改
+    # 把便携版 exe 的 SHA256 写进发行版说明，更新侧下载后校验完整性。
+    # 自动更新只下载便携版，所以校验值只对应它（安装包由用户手动下载）。
     sha = hashlib.sha256()
     with open(exe, "rb") as f:
         for blk in iter(lambda: f.read(1024 * 1024), b""):
@@ -137,7 +141,8 @@ def main():
         action = "updated"
     rid = rel.get("id")
     print(f"{action} release id={rid} tag={tag}")
-    upload_attachment(rid, exe)
+    for e in exes:
+        upload_attachment(rid, e)
     print(f"page=https://gitee.com/{OWNER}/{REPO}/releases/tag/{tag}")
 
 

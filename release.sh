@@ -11,6 +11,7 @@ OWNER="lingfeng983"
 REPO="downloads-tool"
 SPEC="DownloadsTool.spec"
 EXE="dist/多线程下载工具.exe"
+INSTALLER="dist/多线程下载工具安装包.exe"
 
 die() { echo "!! $*" >&2; exit 1; }
 
@@ -42,15 +43,38 @@ fi
 TITLE="${2:-多线程下载工具 ${TAG}}"
 
 # ---------- 1. 打包 ----------
-echo "==> [1/3] PyInstaller 打包（约 2 分钟）"
-rm -f "$EXE"
+echo "==> [1/4] PyInstaller 打包（约 2 分钟）"
+rm -f "$EXE" "$INSTALLER"
 python -m PyInstaller --noconfirm --clean "$SPEC" 2>&1 | tail -3 || true
 [ -f "$EXE" ] || die "打包失败（输出见上）"
 SIZE=$(stat -c %s "$EXE")
 echo "    产物 $EXE（$SIZE 字节）"
 
+# ---------- 1b. Inno Setup 安装包（可选：本机没装 ISCC 就只发免安装版） ----------
+ISCC=""
+for c in "/c/Program Files/Inno Setup 7/ISCC.exe" \
+         "/c/Program Files (x86)/Inno Setup 7/ISCC.exe" \
+         "/c/Program Files/Inno Setup 6/ISCC.exe" \
+         "/c/Program Files (x86)/Inno Setup 6/ISCC.exe"; do
+  # set -e 下不能用 "[ -f ] && break" 形式：循环整体返回非零会误杀脚本
+  if [ -f "$c" ]; then
+    ISCC="$c"
+    break
+  fi
+done
+if [ -n "$ISCC" ]; then
+  echo "==> [1b/4] Inno Setup 构建安装包"
+  VER="$(python -c "import downloader;print(downloader.__version__)")"
+  "$ISCC" //DAppVersion="$VER" installer/DownloadsTool.iss > build/iscc.log 2>&1 \
+    || { tail -20 build/iscc.log; die "安装包构建失败（详见 build/iscc.log）"; }
+  [ -f "$INSTALLER" ] || die "安装包构建失败（未见 $INSTALLER）"
+  echo "    产物 $INSTALLER（$(stat -c %s "$INSTALLER") 字节）"
+else
+  echo "==> [1b/4] 未找到 Inno Setup（ISCC.exe），跳过安装包构建，仅发布免安装版"
+fi
+
 # ---------- 2. 打 tag 并推送 ----------
-echo "==> [2/3] 推送标签 $TAG"
+echo "==> [2/4] 推送标签 $TAG"
 if ! git ls-remote --tags origin "refs/tags/$TAG" | grep -q "refs/tags/$TAG"; then
   git tag -a "$TAG" -m "Release $TAG"
   git push origin "refs/tags/$TAG" || die "推送标签失败"
@@ -59,16 +83,17 @@ else
 fi
 
 # ---------- 3. 创建/更新发行版 ----------
-echo "==> [3/3] 创建或更新发行版 $TAG（中文内容经 UTF-8 文件传递）"
+echo "==> [3/4] 创建或更新发行版 $TAG（中文内容经 UTF-8 文件传递）"
 mkdir -p build
 printf '%s' "$TITLE" > build/rel_title.txt
 if [ -n "${3:-}" ] && [ -f "$3" ]; then
   cp "$3" build/rel_body.txt
 else
   cat > build/rel_body.txt <<EOF
-多线程下载工具 ${TAG} 单文件免安装版。
+多线程下载工具 ${TAG}。
 
-- 下载 \`多线程下载工具.exe\` 双击即可运行（约 24MB，无需 Python）
+- 免安装版：下载 \`多线程下载工具.exe\` 双击即可运行（约 24MB，无需 Python）
+- 安装包版：下载 \`多线程下载工具安装包.exe\`，安装后带开始菜单/桌面快捷方式与卸载器
 - 支持多线程分片、断点续传、限速、线程速度可视化、关闭最小化到托盘
 - 源码即 master 分支，$TAG 标签对应当前提交
 EOF

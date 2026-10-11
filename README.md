@@ -32,6 +32,19 @@ python -m PyInstaller --noconfirm --clean DownloadsTool.spec
 `DownloadsTool.spec` 会裁剪 QML/Quick/软件 OpenGL 渲染等 Qt Widgets 用不到的组件（42MB → 24MB）。
 exe 同样支持自定义数据目录：`多线程下载工具.exe --data-dir D:\MyToolData`。
 
+### 安装包版（可选）
+
+本机装有 Inno Setup（ISCC.exe）时可额外构建安装包版：安装到 Program Files、
+带开始菜单/桌面快捷方式与卸载器，中文安装向导。
+
+```bash
+ISCC //DAppVersion=$(python -c "import downloader;print(downloader.__version__)") installer/DownloadsTool.iss
+# 产物: dist/多线程下载工具安装包.exe
+```
+
+`release.sh` 检测到 ISCC 会自动构建并把安装包一并上传到发行版；未装则跳过、只发免安装版。
+在线更新只认免安装单文件（`update.py` 按"安装包/setup"命名特征跳过安装包附件）。
+
 预编译的 exe 不在仓库源码中，发布在 Gitee「发行版（Releases）」页面，直接下载安装即可。
 
 一键出包并发布到 Gitee 发行版（Git Bash 中运行）：
@@ -41,7 +54,7 @@ exe 同样支持自定义数据目录：`多线程下载工具.exe --data-dir D:
 ./release.sh v3.1 标题   # 或显式指定 tag 与发行版标题
 ```
 
-脚本依次完成：打包 exe → 推送 tag → 创建/更新发行版 → 上传 exe 附件（同名旧附件自动替换，可重复执行）。需先配置 Gitee 个人访问令牌（勾选 projects 权限）：环境变量 `GITEE_TOKEN` 或仓库根目录 `.gitee_token` 文件（已 gitignore）。中文标题/正文/文件名统一经 `release_publish.py` 以 UTF-8 直传 Gitee API，绕开 Windows 控制台 GBK 转码导致的乱码问题。
+脚本依次完成：打包 exe → （检测到 Inno Setup 时）构建安装包 → 推送 tag → 创建/更新发行版 → 上传 exe 附件（免安装版 + 安装包，同名旧附件自动替换，可重复执行）。需先配置 Gitee 个人访问令牌（勾选 projects 权限）：环境变量 `GITEE_TOKEN` 或仓库根目录 `.gitee_token` 文件（已 gitignore）。中文标题/正文/文件名统一经 `release_publish.py` 以 UTF-8 直传 Gitee API，绕开 Windows 控制台 GBK 转码导致的乱码问题。
 
 最终用户使用手册见 [使用说明.md](使用说明.md)。
 

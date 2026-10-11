@@ -61,6 +61,21 @@ def test_pick_latest():
     print("PASS test_pick_latest")
 
 
+def test_exe_asset_prefers_portable():
+    """发行版同时上传安装包附件时，自动更新必须认准便携版 exe"""
+    rel = dict(REL, assets=[
+        {"name": "多线程下载工具安装包.exe", "browser_download_url": "u1"},
+        {"name": "多线程下载工具.exe", "browser_download_url": "u2"},
+    ])
+    assert up.exe_asset(rel)["name"] == "多线程下载工具.exe"
+    # 只有安装包、没有便携版的发行版不作为自动更新来源
+    installer_only = dict(REL, assets=[
+        {"name": "多线程下载工具安装包.exe", "browser_download_url": "u1"}])
+    assert up.exe_asset(installer_only)["name"] == "多线程下载工具安装包.exe"
+    assert up.pick_latest([installer_only]) == {}
+    print("PASS test_exe_asset_prefers_portable")
+
+
 def test_fetch_update_offline(monkey=False):
     """API 不可达时应返回 ok=False 而不是抛异常"""
     orig = up._request_json
@@ -128,6 +143,48 @@ def test_download_worker():
     assert not os.path.exists(path + ".part")
     app.processEvents()
     print("PASS test_download_worker")
+
+
+def test_download_with_sha256():
+    """下载完成后应执行 SHA256 校验。
+
+    回归：曾把模块级 _file_sha256 写成 self._file_sha256，
+    带 SHA256 的发行版（v3.2.0 起）下载完成即 AttributeError、更新必失败。
+    """
+    app = QApplication.instance() or QApplication([])
+    srv, port = _serve_blob()
+    expect = hashlib.sha256(DATA).hexdigest()
+    # 1) 校验和匹配 → download_done
+    w = up.UpdateWorker("2.0.0")
+    got = {}
+    w.download_done.connect(lambda p: got.update(path=p))
+    w.download_failed.connect(lambda m: got.update(err=m))
+    w.start_download(f"http://127.0.0.1:{port}/tool.exe", "多线程下载工具.exe",
+                     expect)
+    for _ in range(200):
+        if "path" in got or "err" in got:
+            break
+        app.processEvents()
+        threading.Event().wait(0.05)
+    assert "err" not in got, got.get("err")
+    assert hashlib.sha256(open(got["path"], "rb").read()).hexdigest() == expect
+    # 2) 校验和不匹配 → download_failed，且文件被删除
+    w2 = up.UpdateWorker("2.0.0")
+    got2 = {}
+    w2.download_done.connect(lambda p: got2.update(path=p))
+    w2.download_failed.connect(lambda m: got2.update(err=m))
+    w2.start_download(f"http://127.0.0.1:{port}/tool.exe", "bad.exe",
+                      "0" * 64)
+    for _ in range(200):
+        if "path" in got2 or "err" in got2:
+            break
+        app.processEvents()
+        threading.Event().wait(0.05)
+    assert "err" in got2 and "SHA256" in got2["err"], got2
+    assert not os.path.exists(os.path.join(w2._download_dir(), "bad.exe"))
+    srv.shutdown()
+    app.processEvents()
+    print("PASS test_download_with_sha256")
 
 
 def test_download_cancel_and_ceiling():
@@ -208,8 +265,10 @@ if __name__ == "__main__":
     test_version_parsing()
     test_is_newer()
     test_pick_latest()
+    test_exe_asset_prefers_portable()
     test_fetch_update_offline()
     test_download_worker()
+    test_download_with_sha256()
     test_download_cancel_and_ceiling()
     test_restart_script()
     test_update_dialog_handlers()

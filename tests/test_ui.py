@@ -125,6 +125,6 @@ def test_window_refresh(app):
 
 
 if __name__ == "__main__":
-    app = test_widgets_draw()
-    test_window_refresh(app)
-    print("ALL UI SMOKE TESTS PASSED")
+    # 用例依赖 pytest 的 app fixture，直接运行时手动构造等价入口
+    import pytest
+    raise SystemExit(pytest.main([__file__, "-q"]))

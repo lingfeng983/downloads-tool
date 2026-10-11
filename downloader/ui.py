@@ -697,11 +697,13 @@ class MainWindow(QMainWindow):
         self.dir_edit = QLineEdit(s.get("save_dir") or config.DEFAULT_SETTINGS["save_dir"])
         dir_row.addWidget(self.dir_edit, 1)
         browse = QPushButton("浏览…")
+        browse.setMinimumWidth(84)        # 三个辅助按钮统一放宽，避免文字贴边
         browse.clicked.connect(self._browse)
         dir_row.addWidget(browse)
         # 直接打开当前目录：os.startfile 走 ShellExecute，比进文件对话框快得多
         open_dir_btn = QPushButton("打开")
         open_dir_btn.setObjectName("Mini")
+        open_dir_btn.setMinimumWidth(68)
         open_dir_btn.setToolTip("直接打开当前保存目录")
         open_dir_btn.clicked.connect(
             lambda: self._shell_open(self.dir_edit.text().strip()))
@@ -710,6 +712,7 @@ class MainWindow(QMainWindow):
         self.recent_btn = QToolButton()
         self.recent_btn.setObjectName("Mini")
         self.recent_btn.setText("最近 ▾")
+        self.recent_btn.setMinimumWidth(84)
         self.recent_btn.setToolTip("最近使用过的保存目录")
         self.recent_btn.setPopupMode(QToolButton.InstantPopup)
         self.recent_btn.setMenu(self._build_recent_menu())
@@ -919,8 +922,14 @@ class MainWindow(QMainWindow):
                 self._refresh_row(r, s)
         total = self.mgr.total_speed()
         active = sum(1 for s in snaps if s["status"] == TaskStatus.DOWNLOADING)
+        paused = sum(1 for s in snaps if s["status"] == TaskStatus.PAUSED)
+        # 暂停的任务单独列出：不能混进"进行中"里误导用户
+        parts = [f"进行中: {active}"]
+        if paused:
+            parts.append(f"已暂停: {paused}")
+        parts.append(f"共 {len(snaps)} 个任务")
         self.status_bar.showMessage(
-            f"进行中: {active} / {len(snaps)}   总速度: {format_speed(total)}   "
+            f"{'   '.join(parts)}   总速度: {format_speed(total)}   "
             f"限速: {self.limit_combo.currentText()}")
 
     def _rebuild_rows(self, snaps):

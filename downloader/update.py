@@ -41,18 +41,28 @@ def _release_score(rel: dict) -> tuple:
 
 
 def pick_latest(releases: list) -> dict:
-    """选出版本号最大且带 exe 附件的正式发行版"""
+    """选出版本号最大且带便携版 exe 附件的正式发行版"""
     candidates = [r for r in releases
                   if not r.get("prerelease")
                   and any(str(a.get("name", "")).lower().endswith(".exe")
+                          and not _is_installer_asset(a.get("name", ""))
                           for a in (r.get("assets") or []))]
     return max(candidates, key=_release_score) if candidates else {}
 
 
+def _is_installer_asset(name: str) -> bool:
+    """安装包附件命名特征：自动更新只认免安装单文件，装包由用户手动下载"""
+    n = str(name).lower()
+    return "安装包" in n or "setup" in n or "install" in n
+
+
 def exe_asset(rel: dict) -> dict:
+    """选便携版 exe 附件；发行版同时上传安装包时跳过安装包附件"""
     assets = [a for a in (rel.get("assets") or [])
               if str(a.get("name", "")).lower().endswith(".exe")]
-    return assets[0] if assets else {}
+    portable = [a for a in assets if not _is_installer_asset(a.get("name", ""))]
+    pool = portable or assets
+    return pool[0] if pool else {}
 
 
 def parse_release_tag(tag: str) -> str:
@@ -275,7 +285,9 @@ class UpdateWorker(QObject):
                     self.download_progress.emit(done, total or -1)
             os.replace(tmp, dest)
             if self._expected_sha256:
-                digest = self._file_sha256(dest)
+                # _file_sha256 是模块级函数：曾经写成 self._file_sha256
+                # 导致带校验的发行版下载完成即 AttributeError、更新必失败
+                digest = _file_sha256(dest)
                 if digest != self._expected_sha256:
                     _silent_remove(dest)
                     raise ValueError(
