@@ -100,6 +100,26 @@ def test_sha256_extraction():
     print("PASS test_sha256_extraction")
 
 
+def test_github_release_upsert_sha():
+    """发布脚本写入两行校验值后，正文必须同时保留免安装与安装包两条。
+
+    回归：v3.3.0 首发时 _upsert_sha_line 误把"免安装版"行当作"安装包版"的
+    同类行替换，导致免安装版校验值丢失、自动更新拿不到 sha256。
+    """
+    import github_release as gr
+
+    body = "说明文字\n"
+    body = gr._upsert_sha_line(body, "免安装版", "a" * 64)
+    body = gr._upsert_sha_line(body, "安装包版", "b" * 64)
+    assert up._extract_portable_sha256(body) == "a" * 64, body
+    assert "安装包版）: " + "b" * 64 in body, body
+    # 重复执行应原位替换而非追加新行
+    body2 = gr._upsert_sha_line(body, "免安装版", "c" * 64)
+    assert body2.count("SHA256") == 2, body2
+    assert up._extract_portable_sha256(body2) == "c" * 64
+    print("PASS test_github_release_upsert_sha")
+
+
 def test_fetch_update_offline(monkey=False):
     """API 不可达时应返回 ok=False 而不是抛异常"""
     orig = up._request_json
@@ -291,6 +311,7 @@ if __name__ == "__main__":
     test_pick_latest()
     test_exe_asset_prefers_portable()
     test_sha256_extraction()
+    test_github_release_upsert_sha()
     test_fetch_update_offline()
     test_download_worker()
     test_download_with_sha256()

@@ -103,12 +103,22 @@ def _upsert_sha_line(body: str, label: str, digest: str) -> str:
 
     用户自定义正文里可能已带校验值（release.sh 支持传正文文件），
     无脑追加会产生重复行（P2-5）。
+
+    注意：不能只判断"行里有 sha256"就替换——免安装版行本身含"安装"二字，
+    处理安装包版时会误匹配并覆盖它，导致免安装版校验值丢失、自动更新
+    无法校验（v3.3.0 首发即踩到）。必须按标签严格区分。
     """
     tag = f"SHA256（{label}）"
+
+    def same_label(line: str) -> bool:
+        if "sha256" not in line.lower():
+            return False
+        if label == "免安装版":
+            return "免安装" in line and "安装包" not in line
+        return "安装包" in line
+
     for line in body.splitlines():
-        if "sha256" in line.lower() and (
-                label in line or ("免安装" in line and "安装包" not in line)
-                or ("安装包" in line)):
+        if same_label(line):
             return body.replace(line, f"{tag}: {digest}")
     return body.rstrip() + f"\n{tag}: {digest}"
 
