@@ -585,7 +585,7 @@ class MainWindow(QMainWindow):
             f"配置文件将保存到:\n{config.DATA_DIR}\n\n"
             "该位置已记住；启动时加 --data-dir 参数可临时覆盖。")
 
-    # ---------- 在线更新（Gitee 发行版） ----------
+    # ---------- 在线更新（GitHub 发行版） ----------
 
     def _auto_check_update(self):
         s = self.mgr.settings

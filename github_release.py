@@ -1,11 +1,21 @@
 # -*- coding: utf-8 -*-
-"""GitHub Release 发布助手（一次性使用：把 dist 产物发布到 GitHub v3.2.1 Release）。
+"""GitHub Release 发布助手（被 release.sh 调用；也可单独运行）。
 
-用法: python github_release.py create | check
-凭证: 复用 release_publish.py 的 Gitee token 读取方式不行（那是 Gitee 的），
-      这里从 Windows 凭证管理器标准条目 git:https://github.com 读取 PAT
-      （由发布流程此前写入，GCM 亦可读）。
+用法:
+  python github_release.py create <tag> <title_file> <body_file>
+  python github_release.py check [tag]
+
+行为：tag 无对应发行版则创建，已存在则更新标题/正文；
+把 dist 下的 exe 作为资产上传（同名旧资产先删除，保证可重复执行）。
+GitHub 资产名仅限 ASCII，中文产物名自动转写：
+  多线程下载工具.exe        -> DownloadsTool-<tag>.exe
+  多线程下载工具安装包.exe  -> DownloadsTool-Setup-<tag>.exe
+正文里引用的下载文件名也会同步替换（Gitee 侧仍用中文名，两平台正文独立）。
+
+凭证：环境变量 GITHUB_TOKEN，或 Windows 凭证管理器标准条目
+git:https://github.com（git push 凭证同源，GCM 亦可读）。
 """
+import hashlib
 import json
 import os
 import sys
@@ -14,14 +24,10 @@ import urllib.request
 
 OWNER = "lingfeng983"
 REPO = "downloads-tool"
-TAG = "v3.2.1"
 API = f"https://api.github.com/repos/{OWNER}/{REPO}"
-TITLE = "多线程下载工具 v3.2.1"
-BODY_FILE = os.path.join("build", "github_body.txt")
-ASSETS = [
-    os.path.join("dist", "多线程下载工具.exe"),
-    os.path.join("dist", "多线程下载工具安装包.exe"),
-]
+
+PORTABLE_EXE = os.path.join("dist", "多线程下载工具.exe")
+INSTALLER_EXE = os.path.join("dist", "多线程下载工具安装包.exe")
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -72,46 +78,71 @@ def request(url, data=None, method=None, content_type=None, raw=False, extra_hea
         return json.loads(body.decode("utf-8")) if body else {}
 
 
-def get_release():
+def get_release(tag):
     try:
-        return request(f"{API}/releases/tags/{TAG}")
+        return request(f"{API}/releases/tags/{tag}")
     except urllib.error.HTTPError:
         return None
 
 
-def create():
-    with open(BODY_FILE, encoding="utf-8") as f:
+def _ascii_asset_name(fname: str, tag: str) -> str:
+    return (fname.replace("多线程下载工具安装包", f"DownloadsTool-Setup-{tag}")
+                 .replace("多线程下载工具", f"DownloadsTool-{tag}"))
+
+
+def _file_sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for blk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(blk)
+    return h.hexdigest()
+
+
+def create(tag, title_file, body_file):
+    with open(title_file, encoding="utf-8") as f:
+        title = f.read().strip()
+    with open(body_file, encoding="utf-8") as f:
         body = f.read().strip()
-    rel = get_release()
+
+    # 免安装版 exe 必须存在；安装包版可选（Inno Setup 未装/未构建时跳过）
+    exes = [p for p in (PORTABLE_EXE, INSTALLER_EXE) if os.path.isfile(p)]
+    if PORTABLE_EXE not in exes:
+        sys.exit(f"portable exe not found: {PORTABLE_EXE}")
+
+    # 正文：中文产物名替换为 ASCII 资产名 + 写入两份 SHA256
+    for p in exes:
+        cn = os.path.basename(p)
+        body = body.replace(cn, _ascii_asset_name(cn, tag))
+    for p, label in ((PORTABLE_EXE, "免安装版"), (INSTALLER_EXE, "安装包版")):
+        if p in exes:
+            body = body.rstrip() + f"\nSHA256（{label}）: {_file_sha256(p)}"
+    body = body.rstrip() + (
+        f"\n\n国内用户可从 Gitee 镜像下载同版本产物："
+        f"https://gitee.com/{OWNER}/{REPO}/releases/tag/{tag}")
+
+    rel = get_release(tag)
     if rel is None:
         rel = request(f"{API}/releases", data=json.dumps({
-            "tag_name": TAG, "target_commitish": "master",
-            "name": TITLE, "body": body, "draft": False, "prerelease": False,
+            "tag_name": tag, "target_commitish": "master",
+            "name": title, "body": body, "draft": False, "prerelease": False,
         }).encode("utf-8"), content_type="application/json")
         print(f"created release id={rel['id']}")
     else:
         print(f"release exists id={rel['id']}, will reuse")
 
     rid = rel["id"]
-    # 上传附件（GitHub Release assets；同名/错名旧资产先删除，可重复执行）
-    import uuid
     existing = {a["name"]: a["id"] for a in request(f"{API}/releases/{rid}/assets")}
-    for junk in ("default.exe",):  # 中文名被 GitHub 改写成的错名资产
+    for junk in ("default.exe",):  # 中文名曾被 GitHub 改写成的错名资产
         if junk in existing:
             request(f"{API}/releases/assets/{existing[junk]}", method="DELETE")
             print(f"removed junk asset {junk}")
             del existing[junk]
-    for path in ASSETS:
-        if not os.path.isfile(path):
-            sys.exit(f"asset not found: {path}")
-        fname = os.path.basename(path)
-        if fname in existing:
-            request(f"{API}/releases/assets/{existing[fname]}", method="DELETE")
-            print(f"removed old asset {fname}")
+    for path in exes:
+        upload_name = _ascii_asset_name(os.path.basename(path), tag)
+        if upload_name in existing:
+            request(f"{API}/releases/assets/{existing[upload_name]}", method="DELETE")
+            print(f"removed old asset {upload_name}")
         data = open(path, "rb").read()
-        # GitHub 要求文件名仅 ASCII：中文名上传前转写为英文带版本号
-        upload_name = (fname.replace("多线程下载工具安装包", f"DownloadsTool-Setup-{TAG}")
-                            .replace("多线程下载工具", f"DownloadsTool-{TAG}"))
         status, headers, _ = request(
             f"https://uploads.github.com/repos/{OWNER}/{REPO}/releases/{rid}/assets"
             f"?name={urllib.parse.quote(upload_name)}",
@@ -119,29 +150,36 @@ def create():
             content_type="application/octet-stream",
             extra_headers={"Content-Type": "application/octet-stream"})
         print(f"uploaded {upload_name} ({len(data)} bytes, HTTP {status})")
-    # 用最终文件名同步正文
-    with open(BODY_FILE, encoding="utf-8") as f:
-        body = f.read().strip()
+
+    # 标题/正文（含最终资产名与校验值）同步到发行版
     request(f"{API}/releases/{rid}", data=json.dumps({
-        "tag_name": TAG, "name": TITLE, "body": body}).encode("utf-8"),
+        "tag_name": tag, "name": title, "body": body}).encode("utf-8"),
         method="PATCH", content_type="application/json")
     print("body updated")
-    print(f"page=https://github.com/{OWNER}/{REPO}/releases/tag/{TAG}")
+    print(f"page=https://github.com/{OWNER}/{REPO}/releases/tag/{tag}")
 
 
-def check():
-    rel = get_release()
+def check(tag=None):
+    rel = get_release(tag) if tag else _latest()
     if rel is None:
-        print("no release yet")
+        print("no release found")
         return
-    print(f"release id={rel['id']} name={rel['name']} draft={rel.get('draft')}")
+    print(f"release id={rel['id']} name={rel['name']} draft={rel.get('draft')} "
+          f"tag={rel.get('tag_name')}")
     for a in request(f"{API}/releases/{rel['id']}/assets"):
         print(f"  asset: {a['name']} {a['size']} bytes -> {a['browser_download_url']}")
+
+
+def _latest():
+    rels = request(f"{API}/releases?per_page=1")
+    return rels[0] if rels else None
 
 
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "check"
     if cmd == "create":
-        create()
+        create(sys.argv[2], sys.argv[3], sys.argv[4])
+    elif cmd == "check":
+        check(sys.argv[2] if len(sys.argv) > 2 else None)
     else:
-        check()
+        sys.exit(f"unknown command: {cmd}")

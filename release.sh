@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# 一键出包 + 发布到 Gitee 发行版
+# 一键出包 + 发布到 GitHub + Gitee 双发行版
 # 用法:  ./release.sh [tag] [标题] [正文文件]
-#        tag 省略时基于 origin 最大 vN 标签自动 +1（如 v2 -> v3）
-# 凭证:  环境变量 GITEE_TOKEN，或仓库根目录 .gitee_token 文件
-#        （在 https://gitee.com/profile/personal_access_tokens 创建，勾选 projects 权限）
+#        tag 省略时基于 downloader.__version__ 自动取 vX.Y.Z
+# 凭证:  Gitee: 环境变量 GITEE_TOKEN 或 .gitee_token 文件
+#        GitHub: Windows 凭证管理器 git:https://github.com 条目（或 GITHUB_TOKEN）
+# 注意:  应用内在线更新只认 GitHub 发行版，GitHub 发布失败即整体失败
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -25,6 +26,7 @@ fi
 [ -z "$(git status --porcelain)" ] || die "工作区有未提交改动，请先提交"
 git fetch -q origin master --tags || die "无法访问 origin（网络/凭证问题？）"
 [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/master)" ] || die "本地 HEAD 与 origin/master 不一致，请先提交并 push"
+git ls-remote -q github refs/heads/master > /dev/null || die "无法访问 github 远程（缺少 github remote？）"
 
 TAG="${1:-}"
 if [ -z "$TAG" ]; then
@@ -73,14 +75,13 @@ else
   echo "==> [1b/4] 未找到 Inno Setup（ISCC.exe），跳过安装包构建，仅发布免安装版"
 fi
 
-# ---------- 2. 打 tag 并推送 ----------
+# ---------- 2. 打 tag 并推送（两个远程都要有） ----------
 echo "==> [2/4] 推送标签 $TAG"
 if ! git ls-remote --tags origin "refs/tags/$TAG" | grep -q "refs/tags/$TAG"; then
   git tag -a "$TAG" -m "Release $TAG"
-  git push origin "refs/tags/$TAG" || die "推送标签失败"
-else
-  echo "    标签 $TAG 已存在，复用"
 fi
+git push origin "refs/tags/$TAG" || die "推送标签到 Gitee 失败"
+git push github "refs/tags/$TAG" || die "推送标签到 GitHub 失败"
 
 # ---------- 3. 创建/更新发行版 ----------
 echo "==> [3/4] 创建或更新发行版 $TAG（中文内容经 UTF-8 文件传递）"
@@ -95,8 +96,14 @@ else
 - 免安装版：下载 \`多线程下载工具.exe\` 双击即可运行（约 24MB，无需 Python）
 - 安装包版：下载 \`多线程下载工具安装包.exe\`，安装后带开始菜单/桌面快捷方式与卸载器
 - 支持多线程分片、断点续传、限速、线程速度可视化、关闭最小化到托盘
-- 源码即 master 分支，$TAG 标签对应当前提交
+- 源码即 master 分支，${TAG} 标签对应当前提交
+- 在线更新源已切换为 GitHub Releases（Gitee 为镜像）
 EOF
 fi
 python release_publish.py "$TAG" build/rel_title.txt build/rel_body.txt
+
+# ---------- 3b. GitHub 发行版（在线更新源，必须成功） ----------
+echo "==> [3b/4] 发布 GitHub 发行版 $TAG"
+python github_release.py create "$TAG" build/rel_title.txt build/rel_body.txt \
+  || die "GitHub 发行版发布失败（在线更新只认 GitHub，必须成功）"
 rm -f build/rel_title.txt build/rel_body.txt

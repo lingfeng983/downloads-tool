@@ -45,16 +45,16 @@ ISCC //DAppVersion=$(python -c "import downloader;print(downloader.__version__)"
 `release.sh` 检测到 ISCC 会自动构建并把安装包一并上传到发行版；未装则跳过、只发免安装版。
 在线更新只认免安装单文件（`update.py` 按"安装包/setup"命名特征跳过安装包附件）。
 
-预编译的 exe 不在仓库源码中，发布在 Gitee「发行版（Releases）」页面，直接下载安装即可。
+预编译的 exe 不在仓库源码中，发布在 [GitHub Releases](https://github.com/lingfeng983/downloads-tool/releases)（[Gitee 镜像](https://gitee.com/lingfeng983/downloads-tool/releases)），直接下载安装即可。
 
-一键出包并发布到 Gitee 发行版（Git Bash 中运行）：
+一键出包并发布到 GitHub + Gitee 双发行版（Git Bash 中运行）：
 
 ```bash
 ./release.sh            # 自动递增 tag（当前 v2.0 → v3）
 ./release.sh v3.1 标题   # 或显式指定 tag 与发行版标题
 ```
 
-脚本依次完成：打包 exe → （检测到 Inno Setup 时）构建安装包 → 推送 tag → 创建/更新发行版 → 上传 exe 附件（免安装版 + 安装包，同名旧附件自动替换，可重复执行）。需先配置 Gitee 个人访问令牌（勾选 projects 权限）：环境变量 `GITEE_TOKEN` 或仓库根目录 `.gitee_token` 文件（已 gitignore）。中文标题/正文/文件名统一经 `release_publish.py` 以 UTF-8 直传 Gitee API，绕开 Windows 控制台 GBK 转码导致的乱码问题。
+脚本依次完成：打包 exe → （检测到 Inno Setup 时）构建安装包 → 推送 tag → 创建/更新发行版 → 上传 exe 附件（免安装版 + 安装包，同名旧附件自动替换，可重复执行）→ GitHub 同步发布。需先配置令牌：GitHub 走 Windows 凭证管理器的 `git:https://github.com` 条目（git push 用同一凭证）；Gitee 个人访问令牌（勾选 projects 权限）经环境变量 `GITEE_TOKEN` 或仓库根目录 `.gitee_token` 文件（已 gitignore）。中文标题/正文经 UTF-8 文件直传 API 绕开控制台 GBK 转码乱码；GitHub 资产名仅限 ASCII，自动转写为 `DownloadsTool-<tag>.exe` / `DownloadsTool-Setup-<tag>.exe`。应用内在线更新只认 GitHub 发行版。
 
 最终用户使用手册见 [使用说明.md](使用说明.md)。
 
@@ -78,7 +78,7 @@ ISCC //DAppVersion=$(python -c "import downloader;print(downloader.__version__)"
 | 重名保护 | 目标文件已存在时自动追加 `(1)(2)` 后缀，不覆盖 |
 | 暂停不卡界面 | 暂停/取消时主动 `shutdown()` 在途 socket 打断阻塞读，实测从 29 秒降到毫秒级 |
 | 健壮续传 | 停止下载时等待所有分片线程真正退出才允许继续，分片带写锁，杜绝两个线程同时写一个分片 |
-| 在线更新 | 启动/每天自动访问 Gitee 发行版 API 比对版本号，发现新版弹窗通知，可一键下载新 exe 并自动替换重启（版本号以 `downloader/__init__.py` 的 `__version__` 为准，与 release.sh 的 tag 对齐） |
+| 在线更新 | 启动/每天自动访问 GitHub 发行版 API 比对版本号，发现新版弹窗通知，可一键下载新 exe 并自动替换重启（版本号以 `downloader/__init__.py` 的 `__version__` 为准，与 release.sh 的 tag 对齐） |
 
 ## 目录结构
 

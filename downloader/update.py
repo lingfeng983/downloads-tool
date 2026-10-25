@@ -1,6 +1,6 @@
-"""在线更新：从 Gitee 发行版检查新版本、下载新版 exe、替换自身并重启。
+"""在线更新：从 GitHub 发行版检查新版本、下载新版 exe、替换自身并重启。
 
-版本源：https://gitee.com/api/v5/repos/<owner>/<repo>/releases（公开接口，无需令牌）。
+版本源：https://api.github.com/repos/<owner>/<repo>/releases（公开接口，无需令牌）。
 tag 约定 vN / vN.N / vN.N.N，取其数字段做语义化比较；比较时把本机 __version__
 末尾的 .0 视作 2 段（"2.0.0" 对应标签 v2.0），避免等于最新 tag 的已发布包
 被误报为可更新。
@@ -23,8 +23,8 @@ logger = logging.getLogger("downloader")
 
 OWNER = "lingfeng983"
 REPO = "downloads-tool"
-API = "https://gitee.com/api/v5"
-RELEASE_PAGE = f"https://gitee.com/{OWNER}/{REPO}/releases"
+API = "https://api.github.com"
+RELEASE_PAGE = f"https://github.com/{OWNER}/{REPO}/releases"
 CHECK_INTERVAL = 24 * 3600        # 自动检查的最小间隔（秒）
 DOWNLOAD_CEILING = 200 * 1024 * 1024   # 内容长度上限，防异常响应写满磁盘
 
@@ -43,7 +43,7 @@ def _release_score(rel: dict) -> tuple:
 def pick_latest(releases: list) -> dict:
     """选出版本号最大且带便携版 exe 附件的正式发行版"""
     candidates = [r for r in releases
-                  if not r.get("prerelease")
+                  if not r.get("prerelease") and not r.get("draft")
                   and any(str(a.get("name", "")).lower().endswith(".exe")
                           and not _is_installer_asset(a.get("name", ""))
                           for a in (r.get("assets") or []))]
@@ -100,7 +100,7 @@ def fetch_update(local_version: str) -> dict:
         rel = pick_latest(releases)
     except Exception as e:
         logger.warning("检查更新失败: %s", e)
-        return {"ok": False, "error": f"无法连接 Gitee 获取最新版本（{e}）"}
+        return {"ok": False, "error": f"无法连接 GitHub 获取最新版本（{e}）"}
     if not rel:
         return {"ok": True, "available": False}
     latest = parse_release_tag(rel.get("tag_name", ""))
@@ -110,8 +110,8 @@ def fetch_update(local_version: str) -> dict:
     asset = exe_asset(rel)
     name = asset.get("name") or "新版本.exe"
     dl = asset.get("browser_download_url") or _asset_fallback_url(rel, name)
-    # 发行版正文里的 SHA256（release_publish.py 写入），下载完成后校验完整性
-    m = re.search(r"SHA256[:：]\s*([0-9a-fA-F]{64})", rel.get("body") or "")
+    # 发行版正文里的 SHA256（github_release.py 写入），下载完成后校验完整性；
+    # 正文含免安装/安装包两行校验值时必须认准免安装版那行
     return {
         "ok": True,
         "available": True,
@@ -122,13 +122,38 @@ def fetch_update(local_version: str) -> dict:
         "page_url": html,
         "file_name": name,
         "download_url": dl,
-        "sha256": m.group(1).lower() if m else "",
+        "sha256": _extract_portable_sha256(rel.get("body") or ""),
     }
 
 
+def _extract_portable_sha256(body: str) -> str:
+    """从发行版正文提取免安装版 exe 的 SHA256。
+
+    兼容两种正文格式：
+    - Gitee 旧格式单行 "SHA256: <64hex>"（只有便携版校验值）
+    - GitHub 新格式两行 "SHA256（免安装版）: …" / "SHA256（安装包版）: …"
+    自动更新只下载免安装版，拿错行必然校验失败。
+    """
+    first = ""
+    for line in (body or "").splitlines():
+        low = line.lower()
+        if "sha256" not in low:
+            continue
+        m = re.search(r"[0-9a-fA-F]{64}", line)
+        if not m:
+            continue
+        if "免安装" in line or "portable" in low:
+            return m.group(0).lower()
+        if "安装包" in line or "setup" in low or "install" in low:
+            continue      # 安装包的校验值不是自动更新要的
+        if not first:
+            first = m.group(0).lower()
+    return first
+
+
 def _asset_fallback_url(rel: dict, name: str) -> str:
-    """Gitee 附件直链有固定形态：/releases/download/<tag>/<urlencoded 文件名>"""
-    return (f"https://gitee.com/{OWNER}/{REPO}/releases/download/"
+    """GitHub 附件直链有固定形态：/releases/download/<tag>/<urlencoded 文件名>"""
+    return (f"https://github.com/{OWNER}/{REPO}/releases/download/"
             f"{urllib.parse.quote(str(rel.get('tag_name', '')))}/"
             f"{urllib.parse.quote(name)}")
 

@@ -1,4 +1,4 @@
-"""在线更新测试：版本比较纯函数 + Gitee 公共 API 结构 + 本地下载链路（不发真实请求）"""
+"""在线更新测试：版本比较纯函数 + GitHub 公共 API 结构 + 本地下载链路（不发真实请求）"""
 import hashlib
 import os
 import sys
@@ -52,9 +52,10 @@ def test_pick_latest():
     old = dict(REL, id=0, tag_name="v2.0", created_at="2026-09-01T00:00:00+08:00")
     new = dict(REL, id=1, tag_name="v10", created_at="2026-10-01T00:00:00+08:00")
     pre = dict(REL, id=2, tag_name="v99", prerelease=True)
+    draft = dict(REL, id=4, tag_name="v98", draft=True)
     noexe = dict(REL, id=3, tag_name="v50",
                  assets=[{"name": "src.zip", "browser_download_url": "u"}])
-    picked = up.pick_latest([old, pre, noexe, new])
+    picked = up.pick_latest([old, pre, draft, noexe, new])
     assert picked.get("tag_name") == "v10", picked.get("tag_name")
     assert up.exe_asset(picked)["name"].endswith(".exe")
     assert up.pick_latest([]) == {}
@@ -68,12 +69,35 @@ def test_exe_asset_prefers_portable():
         {"name": "多线程下载工具.exe", "browser_download_url": "u2"},
     ])
     assert up.exe_asset(rel)["name"] == "多线程下载工具.exe"
+    # GitHub ASCII 命名（DownloadsTool-Setup-<tag>.exe / DownloadsTool-<tag>.exe）
+    gh = dict(REL, assets=[
+        {"name": "DownloadsTool-Setup-v10.exe", "browser_download_url": "u1"},
+        {"name": "DownloadsTool-v10.exe", "browser_download_url": "u2"},
+    ])
+    assert up.exe_asset(gh)["name"] == "DownloadsTool-v10.exe"
     # 只有安装包、没有便携版的发行版不作为自动更新来源
     installer_only = dict(REL, assets=[
         {"name": "多线程下载工具安装包.exe", "browser_download_url": "u1"}])
     assert up.exe_asset(installer_only)["name"] == "多线程下载工具安装包.exe"
     assert up.pick_latest([installer_only]) == {}
     print("PASS test_exe_asset_prefers_portable")
+
+
+def test_sha256_extraction():
+    """正文含免安装/安装包两行 SHA256 时必须取免安装版那行"""
+    gh_body = ("下载说明\n"
+               "SHA256（免安装版）: " + "a" * 64 + "\n"
+               "SHA256（安装包版）: " + "b" * 64)
+    assert up._extract_portable_sha256(gh_body) == "a" * 64
+    # 顺序颠倒（安装包行在前）也不能拿错
+    gh_body2 = ("SHA256（安装包版）: " + "b" * 64 + "\n"
+                "SHA256（免安装版）: " + "a" * 64)
+    assert up._extract_portable_sha256(gh_body2) == "a" * 64
+    # Gitee 旧格式：单行无标注 → 取第一个
+    assert up._extract_portable_sha256("SHA256: " + "c" * 64) == "c" * 64
+    # 无校验值 → 空串
+    assert up._extract_portable_sha256("没有校验值的正文") == ""
+    print("PASS test_sha256_extraction")
 
 
 def test_fetch_update_offline(monkey=False):
@@ -266,6 +290,7 @@ if __name__ == "__main__":
     test_is_newer()
     test_pick_latest()
     test_exe_asset_prefers_portable()
+    test_sha256_extraction()
     test_fetch_update_offline()
     test_download_worker()
     test_download_with_sha256()
