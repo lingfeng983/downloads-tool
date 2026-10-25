@@ -77,12 +77,14 @@ fi
 
 # ---------- 2. 打 tag 并推送（两个远程都要有） ----------
 echo "==> [2/4] 推送标签 $TAG"
-if ! git ls-remote --tags origin "refs/tags/$TAG" | grep -q "refs/tags/$TAG"; then
+if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
   git tag -a "$TAG" -m "Release $TAG"
 fi
-git push origin "refs/tags/$TAG" || die "推送标签到 Gitee 失败"
-# 用户 gitconfig 里 credential.helper= 空值会清掉系统级 manager，
-# 显式指定 -c credential.helper=manager 才能用上 Windows 凭证管理器里的 token
+# Gitee push 需要认证：公开仓库匿名只够 fetch，push 必须带 token
+# （用户 gitconfig 的 credential.helper= 空值清掉了系统级 manager，这里显式注入）
+git -c credential.helper= \
+    -c "credential.helper=!f() { echo username=lingfeng983; echo password=$TOKEN; }; f" \
+    push origin "refs/tags/$TAG" || die "推送标签到 Gitee 失败"
 git -c credential.helper=manager push github "refs/tags/$TAG" \
   || die "推送标签到 GitHub 失败"
 
