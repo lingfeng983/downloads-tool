@@ -125,6 +125,15 @@ class DownloadManager:
         self.settings.update(kwargs)
         config.save_settings(self.settings)
 
+    def reload_settings(self):
+        """从当前数据目录重读设置（切换数据目录后调用，避免旧目录快照
+        覆盖新目录的 settings.json）"""
+        self.settings = config.load_settings()
+        self.save_dir = self.settings.get("save_dir") or config.DEFAULT_SETTINGS["save_dir"]
+        self.default_thread_count = self.settings.get("thread_count", 8)
+        self.limiter.set_rate(self.settings.get("speed_limit", 0) or 0)
+        return self.settings
+
     def set_on_task_done(self, cb):
         self._on_task_done = cb
 
@@ -223,6 +232,9 @@ class DownloadManager:
             task._on_done = self._done_callback
             if info.status == TaskStatus.COMPLETED and not os.path.exists(info.save_path):
                 info.status = TaskStatus.CANCELLED
+            # 预载磁盘分片：恢复的任务在用户点继续前进度条/线程柱状图即可用，
+            # downloaded() 与 thread_speeds() 数据源统一（P1-1）
+            task.preload_chunks()
             with self._lock:
                 if info.url in self._tasks:
                     continue

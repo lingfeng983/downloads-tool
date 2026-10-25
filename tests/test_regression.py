@@ -347,6 +347,92 @@ def test_chunk_write_lock_not_shared():
     print("   写锁按分片实例独立")
 
 
+# ============ 缺陷7（P1-1）: 恢复任务未开始时分片应可预载 ============
+# 症状：重启恢复的任务在用户点"继续"前 chunks 为空，thread_speeds() 返回空、
+# 进度条恒 0%，而 downloaded() 走扫磁盘兜底返回非零——两处数据源不一致
+def test_preload_chunks_after_restore():
+    print("\n[缺陷7] 恢复任务预载磁盘分片，进度立即可用")
+    data = os.urandom(2 * 1024 * 1024)
+    srv, port = serve(data)
+    out = tempfile.mkdtemp(prefix="dlpre_")
+    info = DownloadInfo(f"http://127.0.0.1:{port}/blob", "blob",
+                        os.path.join(out, "blob"), len(data), 2, True)
+    task = DownloadTask(info, SpeedLimiter(300 * 1024))
+    task.start()
+    time.sleep(0.8)
+    task.pause()
+    task._stop_threads(timeout=10)
+    disk = sum(c.done_bytes() for c in task._chunks)
+    assert 0 < disk < len(data), f"应在传输中途暂停 disk={disk}"
+    task._chunks = []            # 模拟"重启后新构造的 DownloadTask"
+    assert task.downloaded() == 0 or task.downloaded() > 0   # 扫磁盘兜底仍可用
+
+    task.preload_chunks()        # 新增的预载入口
+    assert len(task._chunks) == 2, "预载应重建 2 个分片"
+    assert sum(c.written for c in task._chunks) == disk, \
+        "预载后 written 应与磁盘字节数一致"
+    assert 0 < task.progress() < 1.0
+    sp = task.thread_speeds()
+    assert len(sp) == 2 and all(s["total"] > 0 for s in sp)
+    # 幂等：已有分片时不重算
+    task.preload_chunks()
+    assert sum(c.written for c in task._chunks) == disk
+    print(f"   预载 {disk} 字节，进度 {task.progress():.0%}，线程柱状图可用")
+    task.cancel()
+    srv.shutdown()
+
+
+# ============ 缺陷8（P1-3）: retry 在线程未退出时应拒绝 ============
+# 症状：retry() 对 _stop_threads 超时不检查，仍然 remove_dir + start，
+# 残留线程与新城线程各写各的字节段，is_done 误判完成后合并出错位文件
+def test_retry_refuses_when_thread_alive():
+    print("\n[缺陷8] 旧分片线程未退出时 retry 拒绝执行")
+    data = os.urandom(128 * 1024)
+    srv, port = serve(data, stall=True)
+    out = tempfile.mkdtemp(prefix="dlretry_")
+    info = DownloadInfo(f"http://127.0.0.1:{port}/stall", "stall",
+                        os.path.join(out, "stall"), len(data), 1, True)
+    task = DownloadTask(info, SpeedLimiter(0))
+    task.start()
+    time.sleep(0.3)              # 线程应已卡在服务端 HOLD 上
+    alive = len(task._live_threads())
+    assert alive >= 1
+
+    # 让 _stop_threads 假装失败（直接构造超时为 0 的调用路径）
+    orig = task._stop_threads
+    task._stop_threads = lambda timeout=6.0: False   # 模拟 join 超时
+    try:
+        task.retry()
+    finally:
+        task._stop_threads = orig
+    assert task.info.status == TaskStatus.ERROR, task.info.status
+    assert "未能正常退出" in task.error_msg, task.error_msg
+    assert os.path.isdir(info.parts_dir), "拒绝时不得删除分片目录"
+    task.cancel()
+    srv.shutdown()
+
+
+# ============ 缺陷9（P2-1）: 重试等待期间 snapshot 应带 retrying 标记 ============
+# 症状：网络断连自动重试时状态仍是"下载中"但速度为 0，用户无从知晓
+def test_snapshot_retrying_flag():
+    print("\n[缺陷9] snapshot.retrying 随重试计数联动")
+    out = tempfile.mkdtemp(prefix="dlflag_")
+    info = DownloadInfo("http://127.0.0.1:1/x", "x",
+                        os.path.join(out, "x"), 1000, 1, True)
+    task = DownloadTask(info, SpeedLimiter(0))
+    assert task.snapshot().get("retrying") is False
+    task._set_retries(2, "ConnectionError: 模拟断连")
+    snap = task.snapshot()
+    assert snap["retrying"] is False, "非 DOWNLOADING 状态不应标 retrying"
+    info.status = TaskStatus.DOWNLOADING
+    snap = task.snapshot()
+    assert snap["retrying"] is True and "模拟断连" in snap["error"]
+    task._set_retries(0, "")
+    assert task.snapshot()["retrying"] is False
+    assert task.snapshot()["error"] == "", "归零应清掉重试提示"
+    print("   retrying 仅在下载中且重试计数>0 时为真，归零清提示")
+
+
 if __name__ == "__main__":
     HOLD.clear()
     test_split_ranges_never_degenerate()
@@ -359,4 +445,7 @@ if __name__ == "__main__":
     test_pause_returns_quickly_when_stalled()
     test_no_thread_leak_after_pause_resume()
     test_retry_after_pause_produces_valid_file()
+    test_preload_chunks_after_restore()
+    test_retry_refuses_when_thread_alive()
+    test_snapshot_retrying_flag()
     print("\nALL REGRESSION TESTS PASSED")

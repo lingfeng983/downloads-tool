@@ -56,6 +56,14 @@ def apply_data_dir(path: str, remember: bool = True):
             src = os.path.join(old, name)
             if os.path.isfile(src):
                 shutil.copy2(src, os.path.join(path, name))
+        # 迁移成功后清掉旧目录的明文数据：任务列表含完整 URL 历史，
+        # 属隐私敏感内容，换目录（如从 C 盘挪到 D 盘）后不应残留在原地
+        if os.path.isfile(STATE_FILE):
+            for name in ("tasks.json", "settings.json"):
+                try:
+                    os.remove(os.path.join(old, name))
+                except OSError:
+                    pass
 
 
 def init(argv=None):

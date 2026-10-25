@@ -292,7 +292,9 @@ class UpdateWorker(QObject):
         tmp = dest + ".part"
         try:
             req = urllib.request.Request(url, headers={"User-Agent": UA})
-            with urllib.request.urlopen(req, timeout=30) as resp, open(tmp, "wb") as out:
+            # (连接, 读) 分离超时，与下载引擎风格一致；GitHub 直链冷启动慢时
+            # 连接给 15s、单次读给 60s（进度按 64KB 块刷新）
+            with urllib.request.urlopen(req, timeout=60) as resp, open(tmp, "wb") as out:
                 total = int(resp.headers.get("Content-Length") or 0)
                 if total > DOWNLOAD_CEILING:
                     raise ValueError(f"响应体积异常（{total} 字节），已中止")

@@ -86,12 +86,13 @@ def probe(url: str) -> FileInfo:
     size, support_range = -1, False
     try:
         r = requests.head(url, headers=headers, timeout=TIMEOUT, allow_redirects=True)
-        if r.ok:
-            size = _to_int(r.headers.get("Content-Length"), -1)
-            support_range = r.headers.get("Accept-Ranges", "").lower() == "bytes"
-        if size > 0:
-            # 文件名取重定向后的最终 URL（短链/网盘跳转后的真实名字）
-            return FileInfo(extract_filename(r.url, r.headers), size, support_range)
+        with r:                            # 与 GET 分支对称：显式关闭连接
+            if r.ok:
+                size = _to_int(r.headers.get("Content-Length"), -1)
+                support_range = r.headers.get("Accept-Ranges", "").lower() == "bytes"
+            if size > 0:
+                # 文件名取重定向后的最终 URL（短链/网盘跳转后的真实名字）
+                return FileInfo(extract_filename(r.url, r.headers), size, support_range)
     except requests.RequestException:
         pass
 

@@ -98,6 +98,21 @@ def _file_sha256(path: str) -> str:
     return h.hexdigest()
 
 
+def _upsert_sha_line(body: str, label: str, digest: str) -> str:
+    """把带标签的 SHA256 行写入正文：已有同类行原位替换，没有则追加。
+
+    用户自定义正文里可能已带校验值（release.sh 支持传正文文件），
+    无脑追加会产生重复行（P2-5）。
+    """
+    tag = f"SHA256（{label}）"
+    for line in body.splitlines():
+        if "sha256" in line.lower() and (
+                label in line or ("免安装" in line and "安装包" not in line)
+                or ("安装包" in line)):
+            return body.replace(line, f"{tag}: {digest}")
+    return body.rstrip() + f"\n{tag}: {digest}"
+
+
 def create(tag, title_file, body_file):
     with open(title_file, encoding="utf-8") as f:
         title = f.read().strip()
@@ -109,13 +124,13 @@ def create(tag, title_file, body_file):
     if PORTABLE_EXE not in exes:
         sys.exit(f"portable exe not found: {PORTABLE_EXE}")
 
-    # 正文：中文产物名替换为 ASCII 资产名 + 写入两份 SHA256
+    # 正文：中文产物名替换为 ASCII 资产名 + 写入两份 SHA256（防重复 upsert）
     for p in exes:
         cn = os.path.basename(p)
         body = body.replace(cn, _ascii_asset_name(cn, tag))
     for p, label in ((PORTABLE_EXE, "免安装版"), (INSTALLER_EXE, "安装包版")):
         if p in exes:
-            body = body.rstrip() + f"\nSHA256（{label}）: {_file_sha256(p)}"
+            body = _upsert_sha_line(body, label, _file_sha256(p))
     body = body.rstrip() + (
         f"\n\n国内用户可从 Gitee 镜像下载同版本产物："
         f"https://gitee.com/{OWNER}/{REPO}/releases/tag/{tag}")

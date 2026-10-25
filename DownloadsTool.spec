@@ -1,5 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 # 多线程下载工具 单文件 exe 打包规格（裁剪无用 Qt 组件以减小体积）
+# 注意：DROP_PREFIXES 针对 PyQt5 5.15 的二进制命名；升级 PyQt5 大版本后
+# 产物体积异常（暴涨或运行时缺 DLL）先核对此清单。
 import os
 
 # Qt Widgets 应用用不到的二进制（按文件名前缀裁剪）

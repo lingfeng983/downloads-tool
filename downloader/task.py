@@ -135,6 +135,7 @@ class DownloadTask:
         self._merge_requested = threading.Event()
         self._superseded = threading.Event()   # 检测到服务器忽略 Range，其余分片线程退出
         self._single_owner = -1                # 接管整文件下载的线程 ident
+        self._retries = 0                  # 当前分片的连续无进展重试次数（持锁读写）
         self._on_done = None        # 回调（UI/管理器注入）
         # 在途HTTP 响应：暂停/取消时主动 close，让阻塞在 socket 读上的线程
         # 立刻醒来。否则只能等 requests 的读超时（READ_TIMEOUT 秒）才退出，
@@ -197,6 +198,8 @@ class DownloadTask:
             "support_range": info.support_range,
             "error": self.error_msg,
             "chunks": self.thread_speeds() if chunks else [],
+            # 重连等待中：状态仍是"下载中"但速度为 0，给 UI 一个可展示的提示
+            "retrying": self._retries > 0 and info.status == TaskStatus.DOWNLOADING,
         }
 
     # ---------- 生命周期 ----------
@@ -214,6 +217,23 @@ class DownloadTask:
             self._chunks.append(Chunk(0, -1, -1, os.path.join(d, "chunk_0.part")))
         for c in self._chunks:
             c.written = c._last_written = c.done_bytes()   # 续传起点对齐磁盘
+
+    def preload_chunks(self):
+        """为尚未开始的任务从磁盘 .parts 预载分片信息（幂等，只读）。
+
+        重启恢复的任务在用户点"继续"前 self._chunks 为空：downloaded() 靠
+        扫磁盘兜底，但 thread_speeds() 返回空、进度条与"大小"列数字来源
+        不一致。构造后立即预载，让两处数据源统一（分片 written 对齐磁盘）。
+        已有分片（下载中/已暂停）不重算，避免与工作线程竞争。
+        """
+        if self._chunks or self.info.status == TaskStatus.COMPLETED:
+            return
+        try:
+            if not os.path.isdir(parts_dir(self.info.save_path)):
+                return
+            self._prepare_chunks()
+        except OSError:
+            self._chunks = []   # 磁盘异常时回退到旧的扫磁盘路径
 
     def _live_threads(self) -> list[threading.Thread]:
         return [t for t in self._threads if t.is_alive()]
@@ -281,7 +301,19 @@ class DownloadTask:
         """重新下载：清空已下载分片，从头开始"""
         self._cancelled.set()
         self._paused.set()
-        self._stop_threads()
+        # 线程未在预算内退出时拒绝重试：继续删目录会让残留线程重建文件、
+        # 与新起的线程双写同一分片（write_lock 只能防字节交错，防不了
+        # 新旧线程各写各的字节段后 is_done 误判完成）。与 start() 的保护对齐。
+        if not self._stop_threads():
+            self._cancelled.clear()
+            self._paused.set()
+            self.error_msg = "下载线程未能正常退出，请稍后重试或取消该任务"
+            logger.warning("retry() 拒绝执行：%s 个旧分片线程仍存活",
+                           len(self._live_threads()))
+            with self._lock:
+                if self.info.status != TaskStatus.COMPLETED:
+                    self.info.status = TaskStatus.ERROR
+            return
         remove_dir(parts_dir(self.info.save_path))
         try:
             os.remove(self.info.save_path)
@@ -480,9 +512,10 @@ class DownloadTask:
                         return
                     if chunk.written > before:
                         retries = 0      # 本次连接有实际进展，只统计连续无进展的失败
+                        self._set_retries(0, "")
                     else:
                         retries += 1
-                    self.error_msg = f"{type(e).__name__}: {e}（第 {retries} 次重试）"
+                        self._set_retries(retries, f"{type(e).__name__}: {e}")
                     self._backoff(min(2 ** retries, 30))
                     continue
 
@@ -498,13 +531,27 @@ class DownloadTask:
                     self._mark_done(chunk)
                     return
                 retries = 0 if chunk.written > before else retries + 1
-                self.error_msg = f"连接中断，已重连重试（{retries}/{MAX_RETRIES}）"
+                self._set_retries(retries,
+                                  f"连接中断，已重连重试（{retries}/{MAX_RETRIES}）")
                 self._backoff(min(2 ** retries, 30))
 
             if not self._cancelled.is_set() and self._paused.is_set():
                 self._fail("重试次数超限: " + self.error_msg)
         finally:
             sess.close()
+
+    def _set_retries(self, n: int, msg: str):
+        """线程安全记录重试状态；n 归零时同时清掉提示信息。
+
+        此处 error_msg 只在重试等待期间有意义（snapshot 的 retrying 标记），
+        归零清空避免上一轮的"第 N 次重试"残留到任务完成后。
+        """
+        with self._lock:
+            self._retries = n
+            if msg:
+                self.error_msg = msg
+            elif n == 0:
+                self.error_msg = ""
 
     def _convert_single(self, chunk: Chunk) -> bool:
         """服务器声称支持 Range 却忽略 Range（返回整文件 200）时，
@@ -597,7 +644,8 @@ class DownloadTask:
                         raise OSError(
                             f"合并总量 {total_written} 与文件大小 {self.info.total_size} 不符")
                     remove_dir(parts_dir(target))
-            self.info.status = TaskStatus.COMPLETED
+            with self._lock:
+                self.info.status = TaskStatus.COMPLETED
             self.info.total_size = max(self.info.total_size, self._target_size())
             self.speed = 0.0
             cb = self._on_done

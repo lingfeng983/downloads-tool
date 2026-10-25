@@ -579,11 +579,24 @@ class MainWindow(QMainWindow):
             return
         config.apply_data_dir(d)          # 写指针文件，下次启动自动沿用
         self.mgr.load_state()             # 若新目录已有历史任务则合并显示
-        self.mgr.update_settings()
+        self._sync_ui_from_settings()     # 重载新目录设置并刷新控件，
+        self.mgr.update_settings()        # 避免旧目录快照覆盖新目录 settings.json
         QMessageBox.information(
             self, "完成",
             f"配置文件将保存到:\n{config.DATA_DIR}\n\n"
             "该位置已记住；启动时加 --data-dir 参数可临时覆盖。")
+
+    def _sync_ui_from_settings(self):
+        """切换数据目录后，把新目录的设置同步到顶部控件"""
+        s = self.mgr.reload_settings()
+        self.dir_edit.setText(s.get("save_dir") or config.DEFAULT_SETTINGS["save_dir"])
+        idx = self.thread_combo.findText(str(s.get("thread_count", 8)))
+        if idx >= 0:
+            self.thread_combo.setCurrentIndex(idx)
+        li = self.limit_combo.findData(s.get("speed_limit", 0))
+        self.limit_combo.setCurrentIndex(li if li >= 0 else 0)
+        self.auto_open.setChecked(bool(s.get("auto_open", False)))
+        self._refresh_recent_menu()
 
     # ---------- 在线更新（GitHub 发行版） ----------
 
@@ -999,7 +1012,10 @@ class MainWindow(QMainWindow):
         c["bar"].setFormat(f"{s['progress'] * 100:.1f}%")
 
         c["speed"].setText(format_speed(s["speed"]))
-        c["speed"].setToolTip(f"任务总速度 {format_speed(s['speed'])}\n点击左侧柱状图查看各线程")
+        tip = f"任务总速度 {format_speed(s['speed'])}\n点击左侧柱状图查看各线程"
+        if s.get("retrying"):
+            tip = "正在重连服务器（自动重试中）…\n" + tip
+        c["speed"].setToolTip(tip)
 
         declared = s["thread_count"] if s["support_range"] else 1
         c["threads"].set_state(s["chunks"], declared)

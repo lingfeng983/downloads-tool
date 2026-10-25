@@ -1,5 +1,6 @@
 import ctypes
 import sys
+import time
 
 _MUTEX_HANDLE = None   # 持有互斥体句柄，防止被垃圾回收后提前释放
 
@@ -14,7 +15,13 @@ def _ensure_single_instance() -> bool:
         return True
 
     user32 = ctypes.windll.user32
-    hwnd = user32.FindWindowW(None, "多线程下载工具")
+    hwnd = 0
+    # 对方进程可能正在启动（窗口尚未创建完成），短暂重试而不是立刻弹 MessageBox
+    for _ in range(20):
+        hwnd = user32.FindWindowW(None, "多线程下载工具")
+        if hwnd:
+            break
+        time.sleep(0.1)
     if hwnd:
         # 关闭按钮是最小化到托盘（hide），窗口被系统隐藏但仍存在，重新显示即可
         if user32.IsIconic(hwnd):
