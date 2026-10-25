@@ -81,7 +81,10 @@ if ! git ls-remote --tags origin "refs/tags/$TAG" | grep -q "refs/tags/$TAG"; th
   git tag -a "$TAG" -m "Release $TAG"
 fi
 git push origin "refs/tags/$TAG" || die "推送标签到 Gitee 失败"
-git push github "refs/tags/$TAG" || die "推送标签到 GitHub 失败"
+# 用户 gitconfig 里 credential.helper= 空值会清掉系统级 manager，
+# 显式指定 -c credential.helper=manager 才能用上 Windows 凭证管理器里的 token
+git -c credential.helper=manager push github "refs/tags/$TAG" \
+  || die "推送标签到 GitHub 失败"
 
 # ---------- 3. 创建/更新发行版 ----------
 echo "==> [3/4] 创建或更新发行版 $TAG（中文内容经 UTF-8 文件传递）"
