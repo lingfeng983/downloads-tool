@@ -17,8 +17,8 @@ logger = logging.getLogger("downloader")
 
 MAX_RETRIES = 5
 CHUNK_SIZE = 64 * 1024
-READ_TIMEOUT = 15# 单次 socket 读超时。配合 _abort_responses() 的主动 close，
-                    # 暂停/取消能在百毫秒级返回，不必等这个超时
+READ_TIMEOUT = 15  # 单次 socket 读超时。配合 _abort_responses() 的主动 close，
+                   # 暂停/取消能在百毫秒级返回，不必等这个超时
 STOP_JOIN_TIMEOUT = 6.0    # 停止分片线程的**总**等待预算（秒），非每线程
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
@@ -150,7 +150,9 @@ class DownloadTask:
 
     def downloaded(self) -> int:
         if self.info.status == TaskStatus.COMPLETED:
-            return max(self.info.total_size, 0) or self._target_size()
+            if self.info.total_size > 0:
+                return self.info.total_size
+            return self._target_size()   # total_size<=0（空/未知）时以磁盘实况为准
         # 分片写入计数器比 stat 更准确（不受缓冲刷盘延迟影响），也省掉逐片 getsize
         total = sum(c.written for c in self._chunks) if self._chunks else 0
         if total == 0 and not self._chunks:
@@ -305,8 +307,12 @@ class DownloadTask:
         # 与新起的线程双写同一分片（write_lock 只能防字节交错，防不了
         # 新旧线程各写各的字节段后 is_done 误判完成）。与 start() 的保护对齐。
         if not self._stop_threads():
-            self._cancelled.clear()
-            self._paused.set()
+            # 保持停止状态：_cancelled 保持 set 且 _paused 置为 clear，
+            # 残留线程会因 _wait_flags 判定（取消/暂停）而继续退出；
+            # 严禁 make set，否则它们会带着 ERROR 状态继续写分片，
+            # 与下次 start() 的新线程双写。
+            self._paused.clear()
+            self._cancelled.set()
             self.error_msg = "下载线程未能正常退出，请稍后重试或取消该任务"
             logger.warning("retry() 拒绝执行：%s 个旧分片线程仍存活",
                            len(self._live_threads()))
@@ -314,6 +320,15 @@ class DownloadTask:
                 if self.info.status != TaskStatus.COMPLETED:
                     self.info.status = TaskStatus.ERROR
             return
+        # 若 _stop_threads 期间恰好下载完成，_finalize 已把最终文件落盘，
+        # 此时不应清空重下（否则等于先删掉刚下载好的文件再重下）。
+        with self._lock:
+            if self.info.status == TaskStatus.COMPLETED:
+                self._cancelled.clear()
+                self._paused.set()
+                self.error_msg = ""
+                logger.info("retry() 跳过：分片线程退出期间任务已下载完成")
+                return
         remove_dir(parts_dir(self.info.save_path))
         try:
             os.remove(self.info.save_path)
@@ -323,7 +338,8 @@ class DownloadTask:
             self.info.status = TaskStatus.WAITING
             self._chunks = []
             self.speed = 0.0
-        self._cancelled.clear()
+        # _cancelled 的复位统一交给 start() 的持锁区，避免在此处外置 clear
+        # 与其它线程的 start/ 回调产生 CLEAR-SET 竞态窗口。
         self.start()
 
     def cancel(self):
@@ -417,12 +433,14 @@ class DownloadTask:
     # ---------- 工作线程 ----------
 
     def _track_response(self, r):
+        # 用 id(r) 作键而非线程 id：线程 id 在线程退出后可被新线程复用，
+        # 极端情况下旧响应未随线程退出而 _untrack 时会被新响应覆盖丢失中止句柄。
         with self._lock:
-            self._responses[threading.get_ident()] = r
+            self._responses[id(r)] = r
 
-    def _untrack_response(self):
+    def _untrack_response(self, r):
         with self._lock:
-            self._responses.pop(threading.get_ident(), None)
+            self._responses.pop(id(r), None)
 
     def _run_chunk(self, chunk: Chunk):
         sess = requests.Session()
@@ -495,7 +513,7 @@ class DownloadTask:
                                         if self._cancelled.is_set():
                                             return
                     finally:
-                        self._untrack_response()
+                        self._untrack_response(r)
                 except (requests.RequestException, OSError) as e:
                     if self._cancelled.is_set() or not self._paused.is_set():
                         return
@@ -620,7 +638,19 @@ class DownloadTask:
         try:
             with self._merge_lock:
                 if len(self._chunks) == 1 and self._chunks[0].length < 0:
-                    os.replace(self._chunks[0].path, target)
+                    # 未知大小时单线程流式下载（未走分片合并路径）。
+                    # 此时 total_size 已在 _run_chunk 里更新为实际字节数，
+                    # 这里补一道完整性校验：文件缺失或字节数不符都不静默产出损坏文件，
+                    # 与下方多分片分支的大小校验对齐。
+                    path = self._chunks[0].path
+                    if not os.path.exists(path):
+                        raise OSError("下载文件缺失，已放弃合并")
+                    actual = os.path.getsize(path)
+                    if self.info.total_size >= 0 and actual != self.info.total_size:
+                        raise OSError(
+                            f"下载文件大小不符（{actual}/"
+                            f"{self.info.total_size}），已放弃合并")
+                    os.replace(path, target)
                     remove_dir(parts_dir(target))
                 else:
                     total_written = 0

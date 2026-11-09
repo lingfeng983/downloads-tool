@@ -3,4 +3,7 @@ PyQt5>=5.15
 # 已验证组合（2026-10，Python 3.14 / Win11）：
 #   requests 2.31.0 + urllib3 2.6.3 + PyQt5 5.15.10
 # task._raw_socket 对 urllib3 1.x/2.x 的内部结构做了逐层兼容；
-# 升级 requests/urllib3 大版本后建议跑 tests/test_core.py 回归分片下载。
+# 升级 requests/urllib3 大版本后建议同时回归两类场景：
+#   tests/test_core.py       分片下载/断点续传
+#   tests/test_regression.py 暂停/取消时在途连接的中止（_abort_responses）
+# 两者任一缺失都可能在传送层升级后引入"暂停卡住/线程泄漏"的静默回归。

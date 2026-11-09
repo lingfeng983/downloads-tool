@@ -164,9 +164,14 @@ def is_frozen_exe() -> bool:
 
 def _run_detached(cmd: list):
     if sys.platform == "win32":
+        # CREATE_NO_WINDOW 让 cmd /c 不再弹黑窗——否则每次 ping 等待都会冒出
+        # 一个命令行窗口反复闪现，用户侧观感是"反复弹窗卡死更新"。
+        # 搭配 DETACHED_PROCESS 让替换脚本不随旧进程退出而被回收。
         DETACHED_PROCESS = 0x00000008
         CREATE_NEW_PROCESS_GROUP = 0x00000200
-        kwargs = {"creationflags": DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+        CREATE_NO_WINDOW = 0x08000000
+        kwargs = {"creationflags": (DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+                                    | CREATE_NO_WINDOW),
                   "close_fds": True}
     else:
         kwargs = {"start_new_session": True, "close_fds": True}
@@ -174,16 +179,17 @@ def _run_detached(cmd: list):
 
 
 def write_restart_script(new_exe: str, target_exe: str) -> str:
-    """生成替换脚本：等旧进程释放 exe 锁 → 覆盖 → 重启新版"""
+    """生成替换脚本：等旧进程释放 exe 锁 → 覆盖 → 重启新版（全程无黑窗）"""
     script = os.path.join(os.path.dirname(new_exe) or ".", "_update_restart.bat")
     body = f"""@echo off
-rem wait up to 5 min for {os.path.basename(target_exe)} to be released
+setlocal EnableDelayedExpansion
+rem wait until {os.path.basename(target_exe)} is released (max ~150s)
 set /a tries=0
 :wait
 del "{target_exe}" 2>nul
 if exist "{target_exe}" (
     set /a tries+=1
-    if %tries% geq 300 (
+    if !tries! geq 150 (
         copy /y "{new_exe}" "{target_exe}.new" >nul 2>nul
         exit /b 2
     )

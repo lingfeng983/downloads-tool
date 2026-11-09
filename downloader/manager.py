@@ -1,4 +1,5 @@
 """下载管理器：任务注册表、速度监控、任务列表持久化"""
+import hashlib
 import json
 import logging
 import os
@@ -30,6 +31,7 @@ class DownloadManager:
         self.settings = config.load_settings()
         self._lock = threading.RLock()
         self._save_lock = threading.Lock()   # 串行化 save_state，避免多线程写同一个 .tmp
+        self._last_state_digest = None       # 上次落盘内容的摘要，用于跳过无变化的重写
         self._tasks: dict[str, DownloadTask] = {}
         self._order: list[str] = []
         self.limiter = SpeedLimiter(self.settings.get("speed_limit", 0) or 0)
@@ -185,21 +187,31 @@ class DownloadManager:
         同时往同一个 .tmp 文件写 —— 在 Windows 上会撞出Permission denied，
         且 os.replace 可能把写了一半的内容换上去。故用独立的写锁串行化，
         并让临时文件名带上线程 id 兜底。
+
+        监控线程每秒都在跑，但绝大多数"写入内容"与上一秒完全相同（进度没
+        变化）。这里先比较上次落盘内容的摘要，没变化就直接跳过整文件重写，
+        把每秒的 IO 从"全量 dump+落盘"降为"一次内存 hash"，大幅减少磁盘写。
         """
+        digest = None
         try:
             with self._lock:
                 data = [t.info.to_dict() for t in self.tasks()]
+            payload = json.dumps(data, ensure_ascii=False, indent=1)
+            digest = hashlib.md5(payload.encode("utf-8")).hexdigest()
+            if digest == self._last_state_digest:
+                return   # 内容无变化，跳过落盘
             with self._save_lock:
                 state_file = config.STATE_FILE
                 os.makedirs(os.path.dirname(state_file), exist_ok=True)
                 tmp = f"{state_file}.{os.getpid()}.{threading.get_ident()}.tmp"
                 try:
                     with open(tmp, "w", encoding="utf-8") as f:
-                        json.dump(data, f, ensure_ascii=False, indent=1)
+                        f.write(payload)
                     os.replace(tmp, state_file)
                 except OSError:
                     _silent_remove(tmp)
                     raise
+            self._last_state_digest = digest
         except OSError as e:
             logger.warning("保存任务列表失败: %s", e)
 

@@ -562,6 +562,10 @@ class MainWindow(QMainWindow):
         app.aboutToQuit.connect(self._persist_options)
         app.aboutToQuit.connect(self.mgr.shutdown)
         self._build_menu()
+        # 上次更新若因旧进程锁未及时释放而走 .new 兜底（极其少见），
+        # 启动后延迟检查并提示用户手动替换，避免新版文件被遗忘在下载目录
+        if is_frozen_exe():
+            QTimer.singleShot(800, self._warn_pending_update_file)
 
     def _build_menu(self):
         menu = self.menuBar().addMenu("设置(&S)")
@@ -599,6 +603,24 @@ class MainWindow(QMainWindow):
         self._refresh_recent_menu()
 
     # ---------- 在线更新（GitHub 发行版） ----------
+
+    def _warn_pending_update_file(self):
+        """上次更新走 .new 兜底遗留时，提示用户手动完成替换"""
+        try:
+            pending = os.path.abspath(sys.executable) + ".new"
+        except Exception:
+            return
+        if not os.path.isfile(pending):
+            return
+        box = QMessageBox(
+            QMessageBox.Warning, "更新未完成",
+            "上次更新时旧程序文件被占用，新版文件未能自动替换。\n\n"
+            "新版程序已保存在：\n"
+            f"{pending}\n\n"
+            "请关闭本程序后，手动把该 .new 文件改名为当前程序文件名并覆盖，"
+            "或重新点击“检查更新”再次尝试下载安装。",
+            QMessageBox.Ok, self)
+        box.exec_()
 
     def _auto_check_update(self):
         s = self.mgr.settings
@@ -671,8 +693,11 @@ class MainWindow(QMainWindow):
         if is_frozen_exe():
             box = QMessageBox.question(
                 self, "更新已下载",
-                "新版本已下载完成。是否立即退出并自动更新、重启新版？\n"
-                "选择稍后则新版程序会保存在下载目录，当前版本继续运行。",
+                "新版本已下载完成。是否立即退出并自动更新、重启新版？\n\n"
+                "更新在后台静默进行：不会弹出命令行窗口，等待当前程序关闭后\n"
+                "自动替换文件并重启新版（通常约需几秒）。\n\n"
+                "选择“稍后”则新版程序会保存在下载目录（不会静默替换当前程序），"
+                "当前版本继续运行。",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
             if box == QMessageBox.Yes:
                 from . import update as update_mod

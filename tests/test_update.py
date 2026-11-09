@@ -305,6 +305,72 @@ def test_update_dialog_handlers():
     print("PASS test_update_dialog_handlers")
 
 
+def test_apply_update_prompt_and_pending_warning():
+    """补充 UI 提示：更新确认弹窗文案、遗留 .new 文件未完成升级的警告"""
+    from PyQt5.QtWidgets import QMessageBox
+    from downloader import ui as ui_mod
+    from downloader.ui import MainWindow, UpdateDialog
+    app = QApplication.instance() or QApplication([])
+    win = MainWindow()
+    win.show()
+    app.processEvents()
+
+    # 1) 更新确认弹窗文案应明确"后台静默 / 不弹命令行窗口"，避免用户误判卡死
+    captured = {}
+    QMESG = QMessageBox.question
+    QMessageBox.question = staticmethod(
+        lambda *a, **k: captured.update(args=a, **_kwargs(k)) or QMessageBox.Yes)
+    real_frozen = ui_mod.is_frozen_exe
+    real_apply = up.apply_update
+    ui_mod.is_frozen_exe = staticmethod(lambda: True)     # 模拟打包版走弹窗分支
+    up.apply_update = lambda *a, **k: None                # 不真正写脚本/退出
+    try:
+        win._apply_update(os.path.join(_TMP, "new.exe"), {"ok": True})
+    finally:
+        QMessageBox.question = QMESG
+        ui_mod.is_frozen_exe = real_frozen                # is_frozen_exe 由 ui 导入
+        up.apply_update = real_apply
+    text = captured.get("args", (None, None, ""))[2] or ""
+    assert "后台静默" in text and "命令行窗口" in text
+
+    # 2) 无遗留 .new 文件时不弹提示
+    win._warn_pending_update_file()
+    assert win._update_dialog is None
+
+    # 3) 存在遗留 .new 文件时弹"更新未完成"警告
+    #    ui._warn_pending_update_file 用模块级 sys.executable 拼路径，
+    #    用 SimpleNamespace 把 sys.executable 指向可写临时目录，避免写系统目录
+    import types
+    real_ui_sys = ui_mod.sys
+    ui_mod.sys = types.SimpleNamespace(executable=os.path.join(_TMP, "app.exe"))
+    pending = os.path.abspath(ui_mod.sys.executable) + ".new"
+    with open(pending, "w") as f:
+        f.write("new-version-placeholder")
+    warned = {}
+    QINF = QMessageBox.exec_
+    def _exec(inst=None, *a, **k):
+        warned["shown"] = True
+        return QMessageBox.Ok
+    try:
+        ui_mod.QMessageBox.exec_ = _exec
+        win._warn_pending_update_file()
+    finally:
+        ui_mod.QMessageBox.exec_ = QINF
+        ui_mod.sys = real_ui_sys
+        try:
+            os.remove(pending)
+        except OSError:
+            pass
+    assert warned.get("shown"), "存在 .new 时应弹出“更新未完成”警告"
+
+    win.mgr.shutdown()
+    print("PASS test_apply_update_prompt_and_pending_warning")
+
+
+def _kwargs(k):
+    return k
+
+
 if __name__ == "__main__":
     test_version_parsing()
     test_is_newer()
@@ -318,4 +384,5 @@ if __name__ == "__main__":
     test_download_cancel_and_ceiling()
     test_restart_script()
     test_update_dialog_handlers()
+    test_apply_update_prompt_and_pending_warning()
     print("ALL UPDATE TESTS PASSED")
