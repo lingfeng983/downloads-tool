@@ -92,6 +92,9 @@ def _request_json(url: str) -> dict:
 
 def fetch_update(local_version: str) -> dict:
     """返回 {"ok": bool, "available": bool, ...}；网络失败 ok=False"""
+    # 无论处于哪个分支，都把"当前本地版本号"带进结果，供 UI 一并展示
+    # （"已是最新版本（v3.3.1）"需显示当前版本，之前漏回导致版本号空白）
+    _base = {"local_version": local_version}
     url = f"{API}/repos/{OWNER}/{REPO}/releases?per_page=100"
     try:
         releases = _request_json(url)
@@ -100,12 +103,13 @@ def fetch_update(local_version: str) -> dict:
         rel = pick_latest(releases)
     except Exception as e:
         logger.warning("检查更新失败: %s", e)
-        return {"ok": False, "error": f"无法连接 GitHub 获取最新版本（{e}）"}
+        return {**_base, "ok": False,
+                "error": f"无法连接 GitHub 获取最新版本（{e}）"}
     if not rel:
-        return {"ok": True, "available": False}
+        return {**_base, "ok": True, "available": False}
     latest = parse_release_tag(rel.get("tag_name", ""))
     if not is_newer(latest, local_version):
-        return {"ok": True, "available": False}
+        return {**_base, "ok": True, "available": False}
     html = rel.get("html_url") or f"{RELEASE_PAGE}/tag/{rel.get('tag_name', '')}"
     asset = exe_asset(rel)
     name = asset.get("name") or "新版本.exe"
@@ -113,6 +117,7 @@ def fetch_update(local_version: str) -> dict:
     # 发行版正文里的 SHA256（github_release.py 写入），下载完成后校验完整性；
     # 正文含免安装/安装包两行校验值时必须认准免安装版那行
     return {
+        **_base,
         "ok": True,
         "available": True,
         "tag": rel.get("tag_name", ""),
@@ -281,10 +286,8 @@ class UpdateWorker(QObject):
         self._thread.start()
 
     def _do_check(self):
-        info = fetch_update(self.local_version)
-        if info.get("available"):
-            info["local_version"] = self.local_version
-        self.checked.emit(info)
+        # local_version 已由 fetch_update 在所有分支统一注入，无需在此重复赋值
+        self.checked.emit(fetch_update(self.local_version))
 
     def _download_dir(self) -> str:
         from . import config

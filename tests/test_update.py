@@ -121,7 +121,7 @@ def test_github_release_upsert_sha():
 
 
 def test_fetch_update_offline(monkey=False):
-    """API 不可达时应返回 ok=False 而不是抛异常"""
+    """API 不可达时应返回 ok=False 而不是抛异常；且所有分支都带回本地版本号"""
     orig = up._request_json
     def boom(url):
         raise OSError("network down")
@@ -129,14 +129,16 @@ def test_fetch_update_offline(monkey=False):
     try:
         r = up.fetch_update("2.0.0")
         assert r["ok"] is False and "error" in r
+        assert r.get("local_version") == "2.0.0"   # 失败分支也带本地版本号
     finally:
         up._request_json = orig
-    # API 正常、版本已最新 → available=False
+    # API 正常、版本已最新 → available=False（"已是最新版本"弹窗需显示当前版本）
     orig2 = up._request_json
     up._request_json = lambda url: [dict(REL, tag_name="v2.0")]
     try:
         r = up.fetch_update("2.0.0")
         assert r["ok"] and r["available"] is False, r
+        assert r.get("local_version") == "2.0.0", r
     finally:
         up._request_json = orig2
     # API 正常、有新版
@@ -146,6 +148,7 @@ def test_fetch_update_offline(monkey=False):
         assert r["ok"] and r["available"], r
         assert r["version"] == "3" and r["download_url"].endswith("tool.exe")
         assert "多线程下载工具.exe" in r["file_name"]
+        assert r.get("local_version") == "2.0.0", r
     finally:
         up._request_json = orig2
     print("PASS test_fetch_update_offline")
