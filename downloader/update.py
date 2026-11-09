@@ -169,8 +169,8 @@ def is_frozen_exe() -> bool:
 
 def _run_detached(cmd: list):
     if sys.platform == "win32":
-        # CREATE_NO_WINDOW 让 cmd /c 不再弹黑窗——否则每次 ping 等待都会冒出
-        # 一个命令行窗口反复闪现，用户侧观感是"反复弹窗卡死更新"。
+        # CREATE_NO_WINDOW 让 cmd /c 不再弹黑窗——否则升级时屏幕上会冒出
+        # 一个命令行窗口闪现，用户侧观感是"弹窗卡死更新"。
         # 搭配 DETACHED_PROCESS 让替换脚本不随旧进程退出而被回收。
         DETACHED_PROCESS = 0x00000008
         CREATE_NEW_PROCESS_GROUP = 0x00000200
@@ -184,29 +184,29 @@ def _run_detached(cmd: list):
 
 
 def write_restart_script(new_exe: str, target_exe: str) -> str:
-    """生成替换脚本：等旧进程释放 exe 锁 → 覆盖 → 重启新版（全程无黑窗）"""
+    """生成替换脚本：覆盖旧 exe → 重启新版（全程无黑窗）。
+
+    旧进程刚退出时 exe 可能仍被占用，直接对文件锁做短促重试
+    （正常 1~2 秒，最多约 20 秒），不依赖进程 PID，锁一释放即完成；
+    超时才走 .new 兜底，让下次启动提示手动替换。
+    """
     script = os.path.join(os.path.dirname(new_exe) or ".", "_update_restart.bat")
     body = f"""@echo off
 setlocal EnableDelayedExpansion
-rem wait until {os.path.basename(target_exe)} is released (max ~150s)
+rem 覆盖旧 exe；被占用(旧进程未完全退出)则短促重试，最多约 20 秒
 set /a tries=0
-:wait
-del "{target_exe}" 2>nul
-if exist "{target_exe}" (
-    set /a tries+=1
-    if !tries! geq 150 (
-        copy /y "{new_exe}" "{target_exe}.new" >nul 2>nul
-        exit /b 2
-    )
-    ping -n 2 127.0.0.1 >nul
-    goto wait
-)
-copy /y "{new_exe}" "{target_exe}" >nul
-if errorlevel 1 (
+:replace
+copy /y "{new_exe}" "{target_exe}" >nul 2>nul
+if not errorlevel 1 goto done
+set /a tries+=1
+if !tries! geq 20 (
     copy /y "{new_exe}" "{target_exe}.new" >nul 2>nul
     del "{new_exe}" 2>nul
-    exit /b 3
+    exit /b 2
 )
+powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command "Start-Sleep -Milliseconds 900" 2>nul
+goto replace
+:done
 del "{new_exe}" 2>nul
 start "" "{target_exe}"
 del "%~f0" 2>nul

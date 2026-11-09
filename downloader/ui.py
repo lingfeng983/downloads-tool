@@ -870,6 +870,10 @@ class MainWindow(QMainWindow):
         if self.tray:
             self.tray.hide()
         self.close()
+        # 系统托盘图标存在时 Qt 会忽略 quitOnLastWindowClosed，仅 close() 不会
+        # 结束事件循环 → 进程不退出、exe 锁不释放，自动更新等到超时只能落 .new、
+        # 也点"退出"退不掉。必须显式 quit 才能真正终止进程。
+        QApplication.quit()
 
     def closeEvent(self, event):
         # 关闭时最小化到托盘；仅托盘不可用或用户主动退出时才真正关闭
